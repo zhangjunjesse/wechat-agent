@@ -2,7 +2,8 @@ export class VerificationService {
   #verifier
   #tasks = new Map()
   #profiles = new Map()
-  constructor({ verifier }) { if (!verifier) throw new TypeError('verifier is required'); this.#verifier = verifier }
+  #store
+  constructor({ verifier, store = null }) { if (!verifier) throw new TypeError('verifier is required'); this.#verifier = verifier; this.#store = store }
   create({ userId, ilinkUserId }) {
     const task = this.#verifier.createTask({ ilinkUserId })
     const record = { ...task, userId, attempts: 0 }
@@ -15,7 +16,7 @@ export class VerificationService {
     task.attempts++
     const result = await this.#verifier.checkTask(task)
     this.#tasks.set(id, result)
-    if (result.status === 'verified') this.#profiles.set(userId, result.profile)
+    if (result.status === 'verified') { this.#profiles.set(userId, result.profile); await this.#store?.put(userId, result.profile) }
     return publicTask(result)
   }
   profile(userId) { return this.#profiles.get(userId) || null }
