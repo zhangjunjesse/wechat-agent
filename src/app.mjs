@@ -11,7 +11,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
   const owned = []
   let polling
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
-  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, contextProvider: async (userId) => profileStore?.get(userId) })
+  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (userId) => profileStore?.get(userId) })
   const verification = verifier ? new VerificationService({ verifier, store: profileStore }) : null
   polling = new PollingService({ provider, router, intervalMs: pollIntervalMs, onError: (error, botId) => console.error('[poll]', botId, error.message), onEvent: (event) => console.log('[event]', JSON.stringify({ providerBotId: event.providerBotId, providerMessageId: event.providerMessageId, providerUserId: event.providerUserId, text: event.text, hasContext: Boolean(event.contextToken) })) })
   void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch((error) => polling.onError?.(error, 'restore'))
@@ -35,7 +35,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
         const result = await agent.respond({ userId, text, profile })
         return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null })
       }
-      if (req.method === 'GET' && url.pathname === '/assistant-qr.jpg') {
+      if (req.method === 'GET' && (url.pathname === '/assistant-qr.jpg' || url.pathname === '/wechat-agent/assistant-qr.jpg')) {
         const file = process.env.ASSISTANT_QR_FILE || path.resolve('assistant-qr.jpg')
         return binary(res, 200, 'image/jpeg', await fs.readFile(file))
       }
@@ -120,7 +120,7 @@ function page() {
   <h1>WeChat Agent</h1><p>扫码绑定微信 Bot，核验昵称后即可开始对话。</p>
   <section id="chat" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>个人助手</h2><div id="chatlog" style="min-height:100px;border:1px solid #ddd;padding:10px;margin-bottom:8px"></div><input id="chattext" placeholder="输入消息"><button id="send">发送</button></section>
   <input id="user" placeholder="测试用户标识" value="test-user"><button id="start">获取 Bot 绑定二维码</button><div id="status"></div><img id="qr" alt="Bot 绑定二维码">
-  <section id="verify" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>第二步：添加微信“助手”并验证昵称</h2><p>请用微信扫描下方二维码，添加联系人 <b>助手</b>。添加后，请向助手发送页面提供的一次性验证码。</p><img src="/assistant-qr.jpg" alt="助手微信二维码" style="max-width:320px;display:block"><p id="verifyHint">验证码功能将在绑定成功后启用。</p></section>
+  <section id="verify" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>第二步：添加微信“助手”并验证昵称</h2><p>请用微信扫描下方二维码，添加联系人 <b>助手</b>。添加后，请向助手发送页面提供的一次性验证码。</p><img src="assistant-qr.jpg" alt="助手微信二维码" style="max-width:320px;display:block" onerror="this.style.display='none';document.getElementById('qrError').style.display='block'"><div id="qrError" style="display:none;color:#b42318">助手二维码暂时无法加载，请联系管理员。</div><p id="verifyHint">验证码功能将在绑定成功后启用。</p></section>
   <script>
   const $=id=>document.getElementById(id); let timer;
   $('start').onclick=async()=>{clearInterval(timer);const user=$('user').value.trim();if(!user)return;
