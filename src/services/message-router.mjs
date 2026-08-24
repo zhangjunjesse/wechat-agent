@@ -28,7 +28,7 @@ export class MessageRouter {
     const reply = await this.#agent.respond({ userId: binding.userId, history, text: normalized.text })
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
-    const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text })
+    const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })
     return { accepted: true, duplicate: false, providerMessageId: sent.providerMessageId, text: reply.text }
   }
 }

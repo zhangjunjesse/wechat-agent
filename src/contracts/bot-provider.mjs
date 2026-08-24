@@ -39,6 +39,7 @@ export function assertInboundEvent(event) {
     providerMessageId: event.providerMessageId,
     providerUserId: event.providerUserId,
     text: event.text,
+    contextToken: typeof event.contextToken === 'string' ? event.contextToken : '',
     occurredAt: Number.isFinite(event.occurredAt) ? event.occurredAt : Date.now(),
   }
 }
