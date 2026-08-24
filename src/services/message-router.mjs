@@ -5,18 +5,20 @@ export class MessageRouter {
   #conversations = new Map()
   #provider
   #agent
+  #allowPeerUsers
 
-  constructor({ bindings, provider, agent }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
+    this.#allowPeerUsers = allowPeerUsers
   }
 
   async handleInbound(event) {
     const normalized = assertInboundEvent(event)
     const binding = this.#bindings.find((b) => b.providerBotId === normalized.providerBotId)
     if (!binding) return { accepted: false, reason: 'unknown_bot' }
-    if (binding.profile?.providerUserId !== normalized.providerUserId) {
+    if (!this.#allowPeerUsers && binding.profile?.providerUserId !== normalized.providerUserId) {
       return { accepted: false, reason: 'user_mismatch' }
     }
     const key = `${binding.userId}:${normalized.providerUserId}`
