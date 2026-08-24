@@ -3,7 +3,8 @@ export class VerificationService {
   #tasks = new Map()
   #profiles = new Map()
   #store
-  constructor({ verifier, store = null }) { if (!verifier) throw new TypeError('verifier is required'); this.#verifier = verifier; this.#store = store }
+  #onVerified
+  constructor({ verifier, store = null, onVerified = null }) { if (!verifier) throw new TypeError('verifier is required'); this.#verifier = verifier; this.#store = store; this.#onVerified = onVerified }
   create({ userId, ilinkUserId }) {
     const task = this.#verifier.createTask({ ilinkUserId })
     const record = { ...task, userId, attempts: 0 }
@@ -13,10 +14,11 @@ export class VerificationService {
   async check({ userId, id }) {
     const task = this.#tasks.get(id)
     if (!task || task.userId !== userId) throw new Error('verification not found')
+    if (task.status === 'verified') return publicTask(task)
     task.attempts++
     const result = await this.#verifier.checkTask(task)
     this.#tasks.set(id, result)
-    if (result.status === 'verified') { this.#profiles.set(userId, result.profile); await this.#store?.put(userId, result.profile) }
+    if (result.status === 'verified') { this.#profiles.set(userId, result.profile); await this.#store?.put(userId, result.profile); await this.#onVerified?.({ userId, task, profile: result.profile }) }
     return publicTask(result)
   }
   profile(userId) { return this.#profiles.get(userId) || null }
