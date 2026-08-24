@@ -14,15 +14,13 @@ export const BindingStatus = Object.freeze({
 
 export function assertBotProfile(profile) {
   if (!profile || typeof profile !== 'object') throw new TypeError('profile is required')
-  for (const key of ['providerUserId', 'nickname']) {
-    if (typeof profile[key] !== 'string' || !profile[key].trim()) {
-      throw new TypeError(`profile.${key} is required`)
-    }
+  if (typeof profile.providerUserId !== 'string' || !profile.providerUserId.trim()) {
+    throw new TypeError('profile.providerUserId is required')
   }
   return {
     providerUserId: profile.providerUserId,
     username: typeof profile.username === 'string' ? profile.username : '',
-    nickname: profile.nickname,
+    nickname: typeof profile.nickname === 'string' ? profile.nickname : '',
     avatarUrl: typeof profile.avatarUrl === 'string' ? profile.avatarUrl : '',
   }
 }
