@@ -26,6 +26,15 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       const url = new URL(req.url, 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
       if (req.method === 'GET' && url.pathname === '/') return html(res, 200, page())
+      if (req.method === 'POST' && url.pathname === '/api/chat') {
+        const body = await readJson(req)
+        const userId = assertHeader(req, 'x-user-id')
+        const text = String(body.text || '').trim()
+        if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' })
+        const profile = await profileStore?.get(userId)
+        const result = await agent.respond({ userId, text, profile })
+        return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null })
+      }
       if (req.method === 'GET' && url.pathname === '/assistant-qr.jpg') {
         const file = process.env.ASSISTANT_QR_FILE || path.resolve('assistant-qr.jpg')
         return binary(res, 200, 'image/jpeg', await fs.readFile(file))
@@ -107,7 +116,8 @@ function binary(res, status, contentType, body) {
 function page() {
   return `<!doctype html><meta charset="utf-8"><title>WeChat Agent</title>
   <style>body{font:16px system-ui;max-width:640px;margin:40px auto}input,button{font:16px;padding:8px;margin:4px 0}#qr{max-width:360px;display:block;margin-top:20px}#status{white-space:pre-wrap;color:#555}</style>
-  <h1>WeChat Agent</h1><p>第一步：扫码绑定微信 Bot。</p>
+  <h1>WeChat Agent</h1><p>扫码绑定微信 Bot，核验昵称后即可开始对话。</p>
+  <section id="chat" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>个人助手</h2><div id="chatlog" style="min-height:100px;border:1px solid #ddd;padding:10px;margin-bottom:8px"></div><input id="chattext" placeholder="输入消息"><button id="send">发送</button></section>
   <input id="user" placeholder="测试用户标识" value="test-user"><button id="start">获取 Bot 绑定二维码</button><div id="status"></div><img id="qr" alt="Bot 绑定二维码">
   <section id="verify" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>第二步：添加微信“助手”并验证昵称</h2><p>请用微信扫描下方二维码，添加联系人 <b>助手</b>。添加后，请向助手发送页面提供的一次性验证码。</p><img src="/assistant-qr.jpg" alt="助手微信二维码" style="max-width:320px;display:block"><p id="verifyHint">验证码功能将在绑定成功后启用。</p></section>
   <script>
@@ -116,7 +126,8 @@ function page() {
     const r=await fetch('/api/bindings',{method:'POST',headers:{'x-user-id':user},body:'{}'});const b=await r.json();
     if(!r.ok){$('status').textContent=b.error;return} $('status').textContent='请使用微信扫描二维码并确认登录\\n状态：pending';
     const p=b.qrPayload||''; const qr=await fetch('/api/qr?payload='+encodeURIComponent(p)); if(qr.ok){$('qr').src=(await qr.json()).dataUrl}else{$('qr').removeAttribute('src');$('status').textContent+='\\n二维码内容：'+p}
-    timer=setInterval(async()=>{const x=await fetch('/api/bindings/'+b.id,{headers:{'x-user-id':user}});const s=await x.json();$('status').textContent='状态：'+s.status+(s.profile?'\\n用户：'+(s.profile.nickname||'')+' '+(s.profile.username||''):'');if(s.status==='bound'){$('verify').style.display='block';$('verifyHint').textContent='Bot 已绑定。请添加“助手”，再向助手发送一次性验证码。';if(!window.verifyId){const v=await fetch('/api/profile-verifications',{method:'POST',headers:{'x-user-id':user,'content-type':'application/json'},body:JSON.stringify({ilinkUserId:s.profile?.providerUserId||s.providerBotId})});if(v.ok){const t=await v.json();window.verifyId=t.id;$('verifyHint').textContent=t.instruction+'\\n验证码：'+t.code;setInterval(async()=>{const z=await fetch('/api/profile-verifications/'+t.id,{headers:{'x-user-id':user}});if(z.ok){const q=await z.json();if(q.status==='verified'){$('verifyHint').textContent='已核验昵称：'+q.profile.nickname+'\\nwxid：'+q.profile.wxid}}},3000)}}}if(['bound','expired','failed'].includes(s.status))clearInterval(timer)},2000)
+    timer=setInterval(async()=>{const x=await fetch('/api/bindings/'+b.id,{headers:{'x-user-id':user}});const s=await x.json();$('status').textContent='状态：'+s.status+(s.profile?'\\n用户：'+(s.profile.nickname||'')+' '+(s.profile.username||''):'');if(s.status==='bound'){$('verify').style.display='block';$('verifyHint').textContent='Bot 已绑定。请添加“助手”，再向助手发送一次性验证码。';if(!window.verifyId){const v=await fetch('/api/profile-verifications',{method:'POST',headers:{'x-user-id':user,'content-type':'application/json'},body:JSON.stringify({ilinkUserId:s.profile?.providerUserId||s.providerBotId})});if(v.ok){const t=await v.json();window.verifyId=t.id;$('verifyHint').textContent=t.instruction+'\\n验证码：'+t.code;setInterval(async()=>{const z=await fetch('/api/profile-verifications/'+t.id,{headers:{'x-user-id':user}});if(z.ok){const q=await z.json();if(q.status==='verified'){$('verifyHint').textContent='已核验昵称：'+q.profile.nickname+'\\nwxid：'+q.profile.wxid;$('chat').style.display='block'}}},3000)}}}if(['bound','expired','failed'].includes(s.status))clearInterval(timer)},2000)
   };
+  $('send').onclick=async()=>{const text=$('chattext').value.trim();if(!text)return;$('chattext').value='';$('chatlog').innerHTML+='<div><b>我：</b>'+text+'</div>';const r=await fetch('/api/chat',{method:'POST',headers:{'x-user-id':$('user').value,'content-type':'application/json'},body:JSON.stringify({text})});const j=await r.json();$('chatlog').innerHTML+='<div><b>Agent：</b>'+((j.text||j.error||'').replaceAll('<','&lt;'))+'</div>'};
   </script>`
 }
