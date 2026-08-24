@@ -7,6 +7,7 @@
 ## 目标
 
 - 公网入口：`https://datadefender.cn/wechat-agent`
+- 默认使用腾讯 iLink Bot 协议（`src/providers/ilink-provider.mjs`）
 - 用户通过二维码绑定自己的微信 Bot
 - 每个用户拥有独立的 bot binding、Agent conversation 和消息路由空间
 - 一个服务进程服务多个用户；只有 SDK 要求独占运行时才引入按 Bot 的 worker
@@ -24,4 +25,4 @@
 node --test tests/*.test.mjs
 ```
 
-当前测试只验证不依赖第三方 SDK 的合同与状态机，不宣称真实微信扫码已经可用。
+当前测试验证 HTTP 组合、绑定/路由隔离、旧 Web Weixin 协议适配器和腾讯 iLink 协议适配器的请求/响应映射；真实扫码仍需在你的微信账号上做端到端测试。iLink 当前资料明确支持 1v1 私聊，不支持群聊；用户资料来自扫码确认返回的 `ilink_user_id`，昵称/微信号等详细资料是否由当前 iLink 返回需要实测确认。
