@@ -19,6 +19,22 @@ export class RemoteWechatVerifier {
     const code = `WA-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
     return { id: `verify-${Date.now().toString(36)}`, ilinkUserId, code, expiresAt: this.#now() + ttlMs, status: 'pending' }
   }
+  async recentForProfile(profile, { limit = 80 } = {}) {
+    const chats = await this.#get('/wechat-api/chats')
+    const rows = []
+    for (const chat of chats.chats || []) {
+      const messages = await this.#get(`/wechat-api/messages?chat=${encodeURIComponent(chat.chat_wxid)}&limit=${Math.min(limit, 200)}`)
+      for (const message of messages.messages || []) rows.push({ ...message, chat: chat.chat_display || chat.chat_wxid })
+    }
+    const nick = String(profile?.nickname || '').trim()
+    const wxid = String(profile?.wxid || '').trim()
+    return rows.filter((message) => {
+      const sender = `${message.sender_wxid || ''} ${message.sender_display || ''}`
+      const content = String(message.content || '')
+      return (wxid && sender.includes(wxid)) || (nick && (sender.includes(nick) || content.includes('@' + nick)))
+    }).sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0)).slice(-limit)
+  }
+
   async checkTask(task) {
     if (!task || task.expiresAt <= this.#now()) return { ...task, status: 'expired' }
     const chats = await this.#get('/wechat-api/chats')
