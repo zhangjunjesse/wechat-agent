@@ -11,6 +11,7 @@ export class AgentsSdkAgent {
     this.#historyProvider = historyProvider
   }
   async respond({ userId, text, profile }) {
+    if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const history = this.#sessions.get(userId) || []
     const records = await this.#historyProvider?.(userId, profile) || []
     const context = [`用户昵称：${profile?.nickname || '未知'}`, `用户wxid：${profile?.wxid || '未知'}`, '相关微信记录：', ...records.map((r) => `[${r.chat || '微信'}][${r.sender_display || ''}] ${r.content || ''}`)].join('\n')

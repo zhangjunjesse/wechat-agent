@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 
 export function createVerificationCode() {
-  return `WA-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+  return String(crypto.randomInt(100000, 1000000))
 }
 
 export function findAssistantCode(messages, code, { maxAgeMs = 5 * 60_000, now = Date.now } = {}) {

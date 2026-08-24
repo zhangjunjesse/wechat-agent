@@ -18,7 +18,14 @@ export class BindingService {
   async restore() {
     if (!this.#store?.list) return []
     const records = await this.#store.list()
-    for (const record of records) this.#bindings.set(record.id, record)
+    for (const record of records) {
+      if (record.providerSession?.botId && record.providerSession?.token) {
+        record.status = BindingStatus.BOUND
+        record.providerBotId = record.providerSession.botId
+      }
+      this.#bindings.set(record.id, record)
+      if (record.status === BindingStatus.BOUND) await this.#store.put(record)
+    }
     return records.map(publicBinding)
   }
 

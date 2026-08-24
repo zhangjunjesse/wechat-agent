@@ -10,7 +10,8 @@ export class OpenAICompatibleAgent {
     if (typeof fetchImpl !== 'function' || !apiKey) throw new TypeError('fetchImpl and apiKey are required')
     this.#fetch = fetchImpl; this.#baseUrl = baseUrl.replace(/\/$/, ''); this.#apiKey = apiKey; this.#model = model; this.#context = contextProvider; this.#historyProvider = historyProvider
   }
-  async respond({ userId, text }) {
+  async respond({ userId, text, profile }) {
+    if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const history = this.#history.get(userId) || []
     const context = await this.#context?.(userId)
     const recentWechat = await this.#historyProvider?.(userId, context) || []
