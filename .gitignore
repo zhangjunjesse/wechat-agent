@@ -6,3 +6,4 @@ credentials/
 *.credentials.json
 *.sync
 assistant-qr.jpg
+data/*.json
