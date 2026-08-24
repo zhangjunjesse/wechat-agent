@@ -2,7 +2,7 @@
 
 多租户微信 Bot Agent 服务的本地首版骨架。
 
-> 当前状态：已完成 provider-neutral 的绑定状态机、租户隔离合同和 Mock Provider；真实微信 Bot SDK 适配尚未实现。
+> 当前状态：已完成 provider-neutral 绑定/路由、Mock Provider，以及基于公开 WeixinBot 协议文档的实验性 Web Weixin Provider；真实扫码仍需测试账号和实际环境验证。
 
 ## 目标
 
@@ -16,7 +16,7 @@
 
 参考文档：[用户提供的 CSDN SDK 文章](https://blog.csdn.net/gitblog_00184/article/details/160968796)
 
-当前开发环境无法取得该文章正文/API schema，因此真实 provider 适配器不猜测接口。需要补充 SDK 仓库、API 文档或接口示例后，才能接通真实扫码、用户信息、收发消息。
+已补充参考实现仓库 [Urinx/WeixinBot](https://github.com/Urinx/WeixinBot) 的公开协议资料：UUID、二维码、扫码状态、登录页、`webwxinit`、`synccheck`、`webwxsync` 和 `webwxsendmsg`。对应适配器是实验性实现，协议属于较老的 Web WeChat 接口，不能据此保证当前微信账号仍可登录；部署前必须用测试账号做真实扫码验证。
 
 ## 本地验证
 
