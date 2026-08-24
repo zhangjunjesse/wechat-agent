@@ -4,10 +4,12 @@ export class PollingService {
   #intervalMs
   #timers = new Map()
 
-  constructor({ provider, router, intervalMs = 1_000 }) {
+  constructor({ provider, router, intervalMs = 1_000, onError = null, onEvent = null }) {
     this.#provider = provider
     this.#router = router
     this.#intervalMs = intervalMs
+    this.onError = onError
+    this.onEvent = onEvent
   }
 
   start(providerBotId) {
@@ -15,11 +17,11 @@ export class PollingService {
     const tick = async () => {
       try {
         const result = await this.#provider.pollEvents({ providerBotId })
-        for (const event of result.events || []) await this.#router.handleInbound(event)
-      } catch (error) {
-        // Keep the worker alive; the next tick retries transient provider errors.
-        this.onError?.(error, providerBotId)
-      }
+        for (const event of result.events || []) {
+          await this.onEvent?.(event)
+          await this.#router.handleInbound(event)
+        }
+      } catch (error) { this.onError?.(error, providerBotId) }
     }
     const timer = setInterval(tick, this.#intervalMs)
     timer.unref?.()
@@ -30,12 +32,8 @@ export class PollingService {
   stop(providerBotId) {
     const timer = this.#timers.get(providerBotId)
     if (!timer) return false
-    clearInterval(timer)
-    this.#timers.delete(providerBotId)
-    return true
+    clearInterval(timer); this.#timers.delete(providerBotId); return true
   }
 
-  stopAll() {
-    for (const id of this.#timers.keys()) this.stop(id)
-  }
+  stopAll() { for (const id of this.#timers.keys()) this.stop(id) }
 }

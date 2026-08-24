@@ -8,7 +8,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
   let polling
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (binding.providerBotId) polling?.start(binding.providerBotId) } })
   const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true })
-  polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
+  polling = new PollingService({ provider, router, intervalMs: pollIntervalMs, onError: (error, botId) => console.error('[poll]', botId, error.message), onEvent: (event) => console.log('[event]', JSON.stringify({ providerBotId: event.providerBotId, providerMessageId: event.providerMessageId, providerUserId: event.providerUserId, text: event.text, hasContext: Boolean(event.contextToken) })) })
   void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch((error) => polling.onError?.(error, 'restore'))
   const bind = (binding) => {
     const index = owned.findIndex((item) => item.id === binding.id)
