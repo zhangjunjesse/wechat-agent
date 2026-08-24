@@ -11,7 +11,18 @@ export class RemoteWechatVerifier {
     const chat = (chats.chats || []).find((x) => x.chat_display === '助手' || x.chat_display?.includes('助手') || x.chat_wxid === '助手' || x.chat_wxid === 'filehelper')
     if (!chat) return { ...task, status: 'assistant_not_found' }
     const messages = await this.#get(`/wechat-api/messages?chat=${encodeURIComponent(chat.chat_wxid)}&limit=500`)
-    const match = findAssistantCode(messages.messages || [], task.code, { now: this.#now })
+    let match = findAssistantCode(messages.messages || [], task.code, { now: this.#now })
+    // The sync connector may temporarily expose the contact under a different
+    // display name. If the named chat has no match, search recent chats for the
+    // one-time code; the code itself remains the binding proof.
+    if (!match) {
+      for (const candidate of chats.chats || []) {
+        if (candidate.chat_wxid === chat.chat_wxid) continue
+        const candidateMessages = await this.#get(`/wechat-api/messages?chat=${encodeURIComponent(candidate.chat_wxid)}&limit=200`)
+        match = findAssistantCode(candidateMessages.messages || [], task.code, { now: this.#now })
+        if (match) break
+      }
+    }
     return match ? { ...task, status: 'verified', profile: match } : { ...task, status: 'pending' }
   }
   async recentForProfile(profile, { limit = 80 } = {}) {
