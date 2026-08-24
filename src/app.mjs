@@ -28,7 +28,9 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
       if (req.method === 'GET' && match) {
-        return json(res, 200, await bindings.refresh(assertHeader(req, 'x-user-id'), match[1]))
+        const binding = await bindings.refresh(assertHeader(req, 'x-user-id'), match[1])
+        bind(binding)
+        return json(res, 200, binding)
       }
       if (req.method === 'POST' && url.pathname === '/api/bot/webhook') {
         const body = await readJson(req)
