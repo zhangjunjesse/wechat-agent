@@ -4,10 +4,12 @@ import { MessageRouter } from './services/message-router.mjs'
 import { PollingService } from './services/polling-service.mjs'
 
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store }) {
-  const bindings = new BindingService({ provider, clock, store })
   const owned = []
+  let polling
+  const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (binding.providerBotId) polling?.start(binding.providerBotId) } })
   const router = new MessageRouter({ provider, agent, bindings: owned })
-  const polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
+  polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
+  void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch((error) => polling.onError?.(error, 'restore'))
   const bind = (binding) => {
     const index = owned.findIndex((item) => item.id === binding.id)
     if (index >= 0) owned[index] = binding
