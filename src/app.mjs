@@ -5,11 +5,7 @@ import { MessageRouter } from './services/message-router.mjs'
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock }) {
   const bindings = new BindingService({ provider, clock })
   const owned = []
-  const router = new MessageRouter({
-    provider,
-    agent,
-    bindings: owned,
-  })
+  const router = new MessageRouter({ provider, agent, bindings: owned })
   const bind = (binding) => {
     const index = owned.findIndex((item) => item.id === binding.id)
     if (index >= 0) owned[index] = binding
@@ -20,7 +16,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
     try {
       const url = new URL(req.url, 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
-      if (req.method === 'GET' && url.pathname === '/') return json(res, 200, { service: 'wechat-agent', binding: '/api/bindings', webhook: '/api/bot/webhook' })
+      if (req.method === 'GET' && url.pathname === '/') return html(res, 200, page())
       if (req.method === 'POST' && url.pathname === '/api/bindings') {
         await readJson(req)
         const binding = await bindings.start(assertHeader(req, 'x-user-id'))
@@ -65,4 +61,23 @@ function readJson(req) {
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(body))
+}
+function html(res, status, body) {
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' })
+  res.end(body)
+}
+function page() {
+  return `<!doctype html><meta charset="utf-8"><title>WeChat Agent</title>
+  <style>body{font:16px system-ui;max-width:640px;margin:40px auto}input,button{font:16px;padding:8px;margin:4px 0}#qr{max-width:360px;display:block;margin-top:20px}#status{white-space:pre-wrap;color:#555}</style>
+  <h1>WeChat Agent</h1><p>输入测试用户标识后创建绑定。</p>
+  <input id="user" placeholder="测试用户标识" value="test-user"><button id="start">获取二维码</button><div id="status"></div><img id="qr" alt="二维码">
+  <script>
+  const $=id=>document.getElementById(id); let timer;
+  $('start').onclick=async()=>{clearInterval(timer);const user=$('user').value.trim();if(!user)return;
+    const r=await fetch('/api/bindings',{method:'POST',headers:{'x-user-id':user},body:'{}'});const b=await r.json();
+    if(!r.ok){$('status').textContent=b.error;return} $('status').textContent='请使用微信扫描二维码并确认登录\\n状态：pending';
+    const p=b.qrPayload||''; if(/^https?:/.test(p)){$('qr').src=p}else{$('qr').removeAttribute('src');$('status').textContent+='\\n二维码内容：'+p}
+    timer=setInterval(async()=>{const x=await fetch('/api/bindings/'+b.id,{headers:{'x-user-id':user}});const s=await x.json();$('status').textContent='状态：'+s.status+(s.profile?'\\n用户：'+(s.profile.nickname||'')+' '+(s.profile.username||''):'');if(['bound','expired','failed'].includes(s.status))clearInterval(timer)},2000)
+  };
+  </script>`
 }
