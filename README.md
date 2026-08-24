@@ -1,28 +1,49 @@
 # wechat-agent
 
-多租户微信 Bot Agent 服务的本地首版骨架。
+多租户微信个人助手：腾讯 iLink Bot 负责扫码绑定和消息通道，OpenAI Agents SDK 负责 Agent 对话，公网同步的微信聊天记录负责用户资料核验与上下文。
 
-> 当前状态：已完成 provider-neutral 绑定/路由、Mock Provider，以及基于公开 WeixinBot 协议文档的实验性 Web Weixin Provider；真实扫码仍需测试账号和实际环境验证。
+## 公网入口
 
-## 目标
-
-- 公网入口：`https://datadefender.cn/wechat-agent`
-- 默认使用腾讯 iLink Bot 协议（`src/providers/ilink-provider.mjs`）
-- 用户通过二维码绑定自己的微信 Bot
-- 每个用户拥有独立的 bot binding、Agent conversation 和消息路由空间
-- 一个服务进程服务多个用户；只有 SDK 要求独占运行时才引入按 Bot 的 worker
-- 不把微信凭据、Token、二维码内容或个人资料提交到 Git
-
-## SDK 资料边界
-
-参考文档：[用户提供的 CSDN SDK 文章](https://blog.csdn.net/gitblog_00184/article/details/160968796)
-
-已补充参考实现仓库 [Urinx/WeixinBot](https://github.com/Urinx/WeixinBot) 的公开协议资料：UUID、二维码、扫码状态、登录页、`webwxinit`、`synccheck`、`webwxsync` 和 `webwxsendmsg`。对应适配器是实验性实现，协议属于较老的 Web WeChat 接口，不能据此保证当前微信账号仍可登录；部署前必须用测试账号做真实扫码验证。
-
-## 本地验证
-
-```powershell
-node --test tests/*.test.mjs
+```text
+https://datadefender.cn/wechat-agent/
 ```
 
-当前测试验证 HTTP 组合、绑定/路由隔离、旧 Web Weixin 协议适配器和腾讯 iLink 协议适配器的请求/响应映射；真实扫码仍需在你的微信账号上做端到端测试。iLink 当前资料明确支持 1v1 私聊，不支持群聊；用户资料来自扫码确认返回的 `ilink_user_id`，昵称/微信号等详细资料是否由当前 iLink 返回需要实测确认。
+## 完整流程
+
+1. 打开公网入口，输入用户标识并获取 iLink Bot 二维码。
+2. 使用微信扫码并确认 Bot 绑定。
+3. 扫码“助手”二维码，添加微信联系人“助手”。
+4. 向“助手”发送页面生成的一次性验证码。
+5. 服务从公网同步微信记录中找到验证码发送者，保存 `wxid`、昵称和核验时间。
+6. 页面显示个人助手聊天框；每个用户的会话历史独立。
+7. 微信 iLink 消息和网页消息都进入同一个 Agent。
+
+## 运行配置
+
+```env
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_MODEL=deepseek-chat
+AGENT_SDK=openai
+WECHAT_SYNC_BASE_URL=https://datadefender.cn
+WECHAT_SYNC_ACCESS_KEY=...
+```
+
+密钥只放在服务器环境文件中，不要提交 Git。
+
+## 本地开发
+
+```powershell
+npm install
+npm test
+$env:OPENAI_API_KEY='...'
+$env:AGENT_SDK='openai'
+npm start
+```
+
+## 能力边界
+
+- iLink 当前主要是个人 Bot 1 对 1 消息通道，不能当作完整微信通讯录 API。
+- 微信昵称和 wxid 通过“助手 + 一次性验证码 + 已同步聊天记录”核验获得。
+- Agent 默认可以读取与已核验昵称/wxid匹配的最近微信记录，并要求模型区分本人消息和 `@` 消息。
+- Bot Token、模型 Key、微信同步 Key 和运行时 JSON 数据不得提交 Git。
