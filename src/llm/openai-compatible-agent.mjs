@@ -12,7 +12,7 @@ export class OpenAICompatibleAgent {
   async respond({ userId, text }) {
     const history = this.#history.get(userId) || []
     const context = await this.#context?.(userId)
-    const system = `你是一个微信个人助手。请用中文简洁回答。当前用户昵称：${context?.nickname || '未知'}。如果需要引用聊天记录，明确区分用户本人发送和@用户的内容。`
+    const system = `你是一个微信个人助手。请用中文简洁回答。当前用户昵称：${context?.nickname || '未知'}，微信wxid：${context?.wxid || '未知'}。如需使用聊天记录，先按昵称/wxid识别用户本人消息，并明确区分本人发送与@用户内容。`
     const messages = [{ role: 'system', content: system }, ...history.slice(-20), { role: 'user', content: text }]
     const response = await this.#fetch(`${this.#baseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#apiKey}` }, body: JSON.stringify({ model: this.#model, messages, temperature: 0.3 }) })
     if (!response.ok) throw new Error(`LLM request failed: ${response.status}`)

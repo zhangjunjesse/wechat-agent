@@ -6,12 +6,14 @@ export class MessageRouter {
   #provider
   #agent
   #allowPeerUsers
+  #contextProvider
 
-  constructor({ bindings, provider, agent, allowPeerUsers = false }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
     this.#allowPeerUsers = allowPeerUsers
+    this.#contextProvider = contextProvider
   }
 
   async handleInbound(event) {
@@ -27,7 +29,8 @@ export class MessageRouter {
       return { accepted: true, duplicate: true }
     }
     history.push({ role: 'user', ...normalized })
-    const reply = await this.#agent.respond({ userId: binding.userId, history, text: normalized.text })
+    const profile = await this.#contextProvider?.(binding.userId)
+    const reply = await this.#agent.respond({ userId: binding.userId, history, text: normalized.text, profile })
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
     const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })
