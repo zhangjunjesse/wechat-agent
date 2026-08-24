@@ -1,0 +1,11 @@
+services:
+  wechat-agent:
+    build: ..
+    container_name: wechat-agent
+    restart: unless-stopped
+    env_file: ./server.env
+    ports:
+      - "127.0.0.1:8789:8789"
+    volumes:
+      - ./data:/data
+      - ../assistant-qr.jpg:/app/assistant-qr.jpg:ro

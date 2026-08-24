@@ -1,0 +1,4 @@
+# Add inside the existing datadefender.cn HTTPS site block.
+handle /wechat-agent* {
+    reverse_proxy 127.0.0.1:8789
+}
