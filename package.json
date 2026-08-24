@@ -1,0 +1,9 @@
+{
+  "name": "wechat-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant WeChat Bot Agent service skeleton",
+  "scripts": {"test": "node --test tests/*.test.mjs"},
+  "engines": {"node": ">=20"}
+}
