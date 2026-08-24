@@ -4,12 +4,15 @@ import path from 'node:path'
 import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
 import { PollingService } from './services/polling-service.mjs'
+import { VerificationService } from './services/verification-service.mjs'
+import { RemoteWechatVerifier } from './services/remote-wechat-verifier.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier }) {
   const owned = []
   let polling
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
   const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true })
+  const verification = verifier ? new VerificationService({ verifier }) : null
   polling = new PollingService({ provider, router, intervalMs: pollIntervalMs, onError: (error, botId) => console.error('[poll]', botId, error.message), onEvent: (event) => console.log('[event]', JSON.stringify({ providerBotId: event.providerBotId, providerMessageId: event.providerMessageId, providerUserId: event.providerUserId, text: event.text, hasContext: Boolean(event.contextToken) })) })
   void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch((error) => polling.onError?.(error, 'restore'))
   const bind = (binding) => {
@@ -38,6 +41,16 @@ export function createApp({ provider, agent = { async respond({ text }) { return
         const binding = await bindings.start(assertHeader(req, 'x-user-id'))
         bind(binding)
         return json(res, 201, binding)
+      }
+      if (req.method === 'POST' && url.pathname === '/api/profile-verifications') {
+        const body = await readJson(req)
+        if (!verification) return json(res, 503, { error: 'verification_not_configured' })
+        return json(res, 201, verification.create({ userId: assertHeader(req, 'x-user-id'), ilinkUserId: body.ilinkUserId || '' }))
+      }
+      const verifyMatch = url.pathname.match(/^\/api\/profile-verifications\/([^/]+)$/)
+      if (req.method === 'GET' && verifyMatch) {
+        if (!verification) return json(res, 503, { error: 'verification_not_configured' })
+        return json(res, 200, await verification.check({ userId: assertHeader(req, 'x-user-id'), id: verifyMatch[1] }))
       }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
       if (req.method === 'GET' && match) {
