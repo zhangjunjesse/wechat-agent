@@ -21,8 +21,20 @@ export class ILinkProvider {
     const qr = await this.#get('ilink/bot/get_bot_qrcode?bot_type=3')
     if (!qr.qrcode || !qr.qrcode_img_content) throw new Error('iLink QR response missing qrcode')
     const bindingRef = crypto.randomUUID()
-    this.#sessions.set(bindingRef, { userId, qrcode: qr.qrcode, status: 'pending', botId: '', token: '', baseUrl: '', profile: null, cursor: '' })
+    this.#sessions.set(bindingRef, { bindingRef, userId, qrcode: qr.qrcode, status: 'pending', botId: '', token: '', baseUrl: '', profile: null, cursor: '' })
     return { bindingRef, qrPayload: qr.qrcode_img_content, expiresAt: this.#now() + 480_000 }
+  }
+
+  async restoreSession(record) {
+    if (!record?.bindingRef || !record.botId || !record.token) return false
+    this.#sessions.set(record.bindingRef, { bindingRef: record.bindingRef, userId: record.userId || '', qrcode: '', status: 'bound', botId: record.botId, token: record.token, baseUrl: record.baseUrl || this.#baseUrl, profile: record.profile || { providerUserId: record.botId, username: '', nickname: '', avatarUrl: '' }, cursor: record.cursor || '' })
+    return true
+  }
+
+  sessionRecord(bindingRef) {
+    const s = this.#sessions.get(bindingRef)
+    if (!s || s.status !== 'bound') return null
+    return { bindingRef, userId: s.userId, botId: s.botId, token: s.token, baseUrl: s.baseUrl, profile: s.profile, cursor: s.cursor }
   }
 
   async getBindingStatus({ bindingRef }) {
@@ -64,7 +76,7 @@ export class ILinkProvider {
   }
 
   #find(botId) { return [...this.#sessions.values()].find((s) => s.botId === botId || s.profile?.providerUserId === botId) }
-  #bound(s) { return { status: 'bound', providerBotId: s.botId, profile: s.profile } }
+  #bound(s) { return { status: 'bound', providerBotId: s.botId, profile: s.profile, providerSession: this.sessionRecord(s.bindingRef) } }
   async #get(path) {
     const response = await this.#fetch(`${this.#baseUrl}/${path}`, { headers: { 'iLink-App-Id': APP_ID, 'iLink-App-ClientVersion': CLIENT_VERSION } })
     if (!response.ok) throw new Error(`iLink GET failed: ${response.status}`)

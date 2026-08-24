@@ -43,6 +43,7 @@ export class BindingService {
     binding.status = result.status
     if (result.providerBotId) binding.providerBotId = result.providerBotId
     if (result.profile) binding.profile = assertBotProfile(result.profile)
+    if (result.providerSession) binding.providerSession = result.providerSession
     await this.#store?.put(binding)
     if (binding.status === BindingStatus.BOUND) await this.#onBound?.(publicBinding(binding))
     return publicBinding(binding)
