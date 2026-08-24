@@ -20,6 +20,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
     try {
       const url = new URL(req.url, 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
+      if (req.method === 'GET' && url.pathname === '/') return json(res, 200, { service: 'wechat-agent', binding: '/api/bindings', webhook: '/api/bot/webhook' })
       if (req.method === 'POST' && url.pathname === '/api/bindings') {
         await readJson(req)
         const binding = await bindings.start(assertHeader(req, 'x-user-id'))
