@@ -4,11 +4,13 @@ export class BindingService {
   #bindings = new Map()
   #provider
   #clock
+  #store
 
-  constructor({ provider, clock = () => Date.now() }) {
+  constructor({ provider, clock = () => Date.now(), store = null }) {
     if (!provider) throw new TypeError('provider is required')
     this.#provider = provider
     this.#clock = clock
+    this.#store = store
   }
 
   async start(userId) {
@@ -20,6 +22,7 @@ export class BindingService {
       expiresAt: qr.expiresAt, providerBotId: '', profile: null,
     }
     this.#bindings.set(binding.id, binding)
+    await this.#store?.put(binding)
     return publicBinding(binding)
   }
 
@@ -28,12 +31,14 @@ export class BindingService {
     if (binding.status === BindingStatus.BOUND) return publicBinding(binding)
     if (binding.expiresAt <= this.#clock()) {
       binding.status = BindingStatus.EXPIRED
+      await this.#store?.put(binding)
       return publicBinding(binding)
     }
     const result = await this.#provider.getBindingStatus({ bindingRef: binding.providerRef })
     binding.status = result.status
     if (result.providerBotId) binding.providerBotId = result.providerBotId
     if (result.profile) binding.profile = assertBotProfile(result.profile)
+    await this.#store?.put(binding)
     return publicBinding(binding)
   }
 
@@ -46,6 +51,7 @@ export class BindingService {
       binding.profile = assertBotProfile(profile)
     }
     binding.status = status
+    this.#store?.put(binding)
     return publicBinding(binding)
   }
 

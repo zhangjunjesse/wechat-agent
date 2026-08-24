@@ -3,8 +3,8 @@ import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
 import { PollingService } from './services/polling-service.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs }) {
-  const bindings = new BindingService({ provider, clock })
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store }) {
+  const bindings = new BindingService({ provider, clock, store })
   const owned = []
   const router = new MessageRouter({ provider, agent, bindings: owned })
   const polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
