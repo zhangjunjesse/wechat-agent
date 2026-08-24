@@ -1,11 +1,13 @@
 import http from 'node:http'
 import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
+import { PollingService } from './services/polling-service.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs }) {
   const bindings = new BindingService({ provider, clock })
   const owned = []
   const router = new MessageRouter({ provider, agent, bindings: owned })
+  const polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
   const bind = (binding) => {
     const index = owned.findIndex((item) => item.id === binding.id)
     if (index >= 0) owned[index] = binding
@@ -17,6 +19,12 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       const url = new URL(req.url, 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
       if (req.method === 'GET' && url.pathname === '/') return html(res, 200, page())
+      if (req.method === 'GET' && url.pathname === '/api/qr') {
+        const payload = url.searchParams.get('payload') || ''
+        if (!payload || payload.length > 2000) return json(res, 400, { error: 'invalid_qr_payload' })
+        const { toDataURL } = await import('qrcode')
+        return json(res, 200, { dataUrl: await toDataURL(payload, { width: 320, margin: 2 }) })
+      }
       if (req.method === 'POST' && url.pathname === '/api/bindings') {
         await readJson(req)
         const binding = await bindings.start(assertHeader(req, 'x-user-id'))
@@ -76,7 +84,7 @@ function page() {
   $('start').onclick=async()=>{clearInterval(timer);const user=$('user').value.trim();if(!user)return;
     const r=await fetch('/api/bindings',{method:'POST',headers:{'x-user-id':user},body:'{}'});const b=await r.json();
     if(!r.ok){$('status').textContent=b.error;return} $('status').textContent='请使用微信扫描二维码并确认登录\\n状态：pending';
-    const p=b.qrPayload||''; if(/^https?:/.test(p)){$('qr').src=p}else{$('qr').removeAttribute('src');$('status').textContent+='\\n二维码内容：'+p}
+    const p=b.qrPayload||''; const qr=await fetch('/api/qr?payload='+encodeURIComponent(p)); if(qr.ok){$('qr').src=(await qr.json()).dataUrl}else{$('qr').removeAttribute('src');$('status').textContent+='\\n二维码内容：'+p}
     timer=setInterval(async()=>{const x=await fetch('/api/bindings/'+b.id,{headers:{'x-user-id':user}});const s=await x.json();$('status').textContent='状态：'+s.status+(s.profile?'\\n用户：'+(s.profile.nickname||'')+' '+(s.profile.username||''):'');if(['bound','expired','failed'].includes(s.status))clearInterval(timer)},2000)
   };
   </script>`
