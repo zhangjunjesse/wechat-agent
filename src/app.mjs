@@ -5,6 +5,7 @@ import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
 import { PollingService } from './services/polling-service.mjs'
 import { VerificationService } from './services/verification-service.mjs'
+import { renderPage } from './ui-page.mjs'
 
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore }) {
   const owned = []
@@ -22,7 +23,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
     try {
       const url = new URL(req.url, 'http://localhost')
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
-      if (req.method === 'GET' && url.pathname === '/') return html(res, 200, page())
+      if (req.method === 'GET' && url.pathname === '/') return html(res, 200, renderPage())
       if (req.method === 'GET' && (url.pathname === '/assistant-qr.jpg' || url.pathname === '/wechat-agent/assistant-qr.jpg')) return binary(res, 200, 'image/jpeg', await fs.readFile(process.env.ASSISTANT_QR_FILE || path.resolve('assistant-qr.jpg')))
       if (req.method === 'GET' && url.pathname === '/api/qr') { const payload = url.searchParams.get('payload') || ''; if (!payload || payload.length > 2000) return json(res, 400, { error: 'invalid_qr_payload' }); const { toDataURL } = await import('qrcode'); return json(res, 200, { dataUrl: await toDataURL(payload, { width: 320, margin: 2 }) }) }
       if (req.method === 'POST' && url.pathname === '/api/bindings') { await readJson(req); const binding = await bindings.start(assertHeader(req, 'x-user-id')); bind(binding); return json(res, 201, binding) }
