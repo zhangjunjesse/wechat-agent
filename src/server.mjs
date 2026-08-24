@@ -10,6 +10,7 @@ const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./servi
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
 const historyProvider = process.env.WECHAT_SYNC_ACCESS_KEY ? async (userId, profile) => verifier?.recentForProfile(profile) : null
 const agent = process.env.OPENAI_API_KEY ? (process.env.AGENT_SDK === 'openai' ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'gpt-4o-mini', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, historyProvider }) : new OpenAICompatibleAgent({ baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL || 'gpt-4o-mini', contextProvider: async (userId) => profileStore.get(userId), historyProvider })) : undefined
+process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const app = createApp({ provider, store, verifier, profileStore, agent })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'

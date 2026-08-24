@@ -114,7 +114,8 @@ function binary(res, status, contentType, body) {
   res.end(body)
 }
 function page() {
-  return `<!doctype html><meta charset="utf-8"><title>WeChat Agent</title>
+  const basePath = process.env.PUBLIC_BASE_PATH || '/'
+  return `<!doctype html><meta charset="utf-8"><base href="${basePath}"><title>WeChat Agent</title>
   <style>body{font:16px system-ui;max-width:640px;margin:40px auto}input,button{font:16px;padding:8px;margin:4px 0}#qr{max-width:360px;display:block;margin-top:20px}#status{white-space:pre-wrap;color:#555}</style>
   <h1>WeChat Agent</h1><p>扫码绑定微信 Bot，核验昵称后即可开始对话。</p>
   <section id="chat" style="display:none;margin-top:28px;border-top:1px solid #ddd;padding-top:18px"><h2>个人助手</h2><div id="chatlog" style="min-height:100px;border:1px solid #ddd;padding:10px;margin-bottom:8px"></div><input id="chattext" placeholder="输入消息"><button id="send">发送</button></section>
