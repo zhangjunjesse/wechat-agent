@@ -10,6 +10,11 @@ export function createApp({ provider, agent = { async respond({ text }) { return
     agent,
     bindings: owned,
   })
+  const bind = (binding) => {
+    const index = owned.findIndex((item) => item.id === binding.id)
+    if (index >= 0) owned[index] = binding
+    else owned.push(binding)
+  }
 
   return async function handler(req, res) {
     try {
@@ -18,7 +23,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'POST' && url.pathname === '/api/bindings') {
         await readJson(req)
         const binding = await bindings.start(assertHeader(req, 'x-user-id'))
-        owned.push(binding)
+        bind(binding)
         return json(res, 201, binding)
       }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
