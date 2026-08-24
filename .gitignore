@@ -7,3 +7,4 @@ credentials/
 *.sync
 assistant-qr.jpg
 data/*.json
+deploy/*.tgz
