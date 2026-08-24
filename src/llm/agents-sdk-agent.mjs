@@ -4,6 +4,7 @@ import { Agent, OpenAIChatCompletionsModel, run } from '@openai/agents'
 export class AgentsSdkAgent {
   #agent
   #sessions = new Map()
+  #historyProvider
   constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, historyProvider = null }) {
     const sdkModel = new OpenAIChatCompletionsModel(new OpenAI({ apiKey, baseURL: baseUrl }), model)
     this.#agent = new Agent({ name: '微信个人助手', model: sdkModel, instructions: '你是中文微信个人助手。回答简洁、准确；已提供聊天记录时，严格区分用户本人、群成员和@用户消息。' })
