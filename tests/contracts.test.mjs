@@ -23,7 +23,7 @@ test('router isolates bots and deduplicates provider event ids', async () => {
   const provider = new MockBotProvider()
   const calls = []
   const router = new MessageRouter({
-    bindings, provider,
+    bindings, provider, requireVerified: false,
     agent: { async respond(input) { calls.push(input); return { text: `echo:${input.text}` } } },
   })
   const event = { providerBotId: 'bot-a', providerMessageId: 'm-1', providerUserId: profile.providerUserId, text: 'hello' }
