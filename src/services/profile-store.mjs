@@ -35,4 +35,11 @@ export class ProfileStore {
     const userId = this.#byIlink.get(String(ilinkUserId))
     return userId ? structuredClone(this.#records.get(userId) || null) : null
   }
+  /** Resolve any key (browser id or providerUserId) to the stable tenant key
+   * (providerUserId). Falls back to the input when no ilinkUserId is known
+   * (e.g. unverified user). */
+  async stableKey(userId) {
+    const profile = await this.get(userId)
+    return profile?.ilinkUserId || String(userId)
+  }
 }
