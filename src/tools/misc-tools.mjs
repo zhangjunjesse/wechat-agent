@@ -1,4 +1,5 @@
 import { tool } from '@openai/agents'
+import { beijingDateTimeStr, beijingParts } from '../services/time.mjs'
 
 /** Misc tools: current time, skill loading, clarification. */
 export function miscTools({ skillRegistry }) {
@@ -7,8 +8,8 @@ export function miscTools({ skillRegistry }) {
     description: '获取当前准确时间、日期、星期',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async () => {
-      const d = new Date()
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} 周${'日一二三四五六'[d.getDay()]}`
+      const p = beijingParts(Date.now())
+      return `${beijingDateTimeStr(Date.now())} 周${'日一二三四五六'[p.weekday]}`
     },
   })
 

@@ -1,3 +1,5 @@
+import { beijingDateStr, beijingWeekday } from '../services/time.mjs'
+
 /** Extracts long-term memories from a conversation turn using the LLM.
  *
  * Output cards carry a cognitive `type` (episodic / semantic), a business
@@ -19,7 +21,7 @@ export class MemoryExtractor {
 }
 
 export function buildExtractPrompt(userText, assistantText, now = new Date(), existingMemories = []) {
-  const nowStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const nowStr = beijingDateStr(now)
   return `你是一个记忆提取器。从这轮对话中，提取值得长期记住的、关于用户的信息。
 
 每条记忆按「类型」区分：
@@ -100,13 +102,13 @@ function parseDue(value, now) {
   if (raw === '后天') return base.getTime() + 2 * 86400000
   const weekday = {'周一':1,'周二':2,'周三':3,'周四':4,'周五':5,'周六':6,'周日':0,'星期一':1,'星期二':2,'星期三':3,'星期四':4,'星期五':5,'星期六':6,'星期日':0}[raw]
   if (weekday !== undefined) {
-    const days = (weekday - base.getDay() + 7) % 7 || 7
+    const days = (weekday - beijingWeekday(base) + 7) % 7 || 7
     return base.getTime() + days * 86400000
   }
   const nextWeek = raw.match(/^下周([一二三四五六日天])$/)
   if (nextWeek) {
     const target = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'日':0,'天':0}[nextWeek[1]]
-    const days = 7 + ((target - base.getDay() + 7) % 7)
+    const days = 7 + ((target - beijingWeekday(base) + 7) % 7)
     return base.getTime() + days * 86400000
   }
   return 0

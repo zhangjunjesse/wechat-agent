@@ -46,5 +46,5 @@ export class SessionCompactor {
 /** Default summarization prompt for a personal assistant. */
 export function buildSummarizePrompt(turns) {
   const text = turns.map((m) => `${m.role === 'user' ? '用户' : '助手'}: ${m.content}`).join('\n')
-  return `请把以下对话历史压缩成一段简洁的要点摘要。必须保留：用户的称呼/偏好、讨论过的关键事实、未完成的事项、用户明确表达的观点。忽略寒暄和无关细节。\n\n${text.slice(-12000)}\n\n只输出摘要本身，不要解释。`
+  return `请把以下对话历史压缩成一段简洁的要点摘要。只保留会影响后续对话的信息：用户的称呼/偏好、关键事实、用户提出的要求或承诺、尚未完成的待办、已做出的决定。不要概括寒暄和一次性闲聊。\n\n${text.slice(-12000)}\n\n只输出摘要本身，不要解释。`
 }

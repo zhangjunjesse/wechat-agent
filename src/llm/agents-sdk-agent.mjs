@@ -5,6 +5,7 @@ import { MemoryStore } from '../services/memory-store.mjs'
 import { SessionCompactor, buildSummarizePrompt } from './session-compactor.mjs'
 import { MemoryExtractor } from './memory-extractor.mjs'
 import { MemoryManager } from './memory-manager.mjs'
+import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -19,7 +20,9 @@ export class AgentsSdkAgent {
     const sdkModel = new OpenAIChatCompletionsModel(client, model)
     // Agent is a stateless definition; build one per call so tools can carry
     // per-user sandboxing through run context (ctx.context.userId).
-    const baseInstructions = '你是中文微信个人助手。回答简洁、准确；能调用工具完成任务。' + (skillCatalog ? `\n${skillCatalog}` : '')
+    // Safety rules + role behavior + skill catalog are static instructions;
+    // identity/time/memory/summary are injected per-turn via buildDynamicSystem.
+    const baseInstructions = buildBaseInstructions({ skillCatalog })
     this.#makeAgent = () => new Agent({ name: '微信个人助手', model: sdkModel, instructions: baseInstructions, tools })
     this.#sessions = sessionStore || new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
     this.#compactor = new SessionCompactor({ summarize: async (turns) => this.#summarize(turns), tokenBudget, threshold, keepTurns })
@@ -42,13 +45,13 @@ export class AgentsSdkAgent {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const session = this.#sessions.get(userId)
     const memories = this.#memory.recall(userId)
-    const context = [
-      `用户昵称：${profile?.nickname || '未知'}`,
-      `用户wxid：${profile?.wxid || '未知'}`,
-      this.#memory.nowLine(),
+    const context = buildDynamicSystem({
+      nickname: profile?.nickname || '',
+      assistantName: profile?.assistantName || '助手',
       memories,
-      session.summary ? `此前对话要点：\n${session.summary}` : '',
-    ].filter(Boolean).join('\n')
+      summary: session.summary || '',
+      nowMs: Date.now(),
+    })
     const result = await run(this.#makeAgent(), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
