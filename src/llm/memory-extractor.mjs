@@ -11,14 +11,14 @@ export class MemoryExtractor {
     if (typeof complete !== 'function') throw new TypeError('complete is required')
     this.#complete = complete
   }
-  async extract(userText, assistantText, now) {
-    const prompt = buildExtractPrompt(userText, assistantText, now)
+  async extract(userText, assistantText, now, existingMemories = []) {
+    const prompt = buildExtractPrompt(userText, assistantText, now, existingMemories)
     const raw = await this.#complete([{ role: 'user', content: prompt }], { temperature: 0, maxTokens: 900 })
     return parseCards(raw)
   }
 }
 
-export function buildExtractPrompt(userText, assistantText, now = new Date()) {
+export function buildExtractPrompt(userText, assistantText, now = new Date(), existingMemories = []) {
   const nowStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
   return `你是一个记忆提取器。从这轮对话中，提取值得长期记住的、关于用户的信息。
 
@@ -42,6 +42,9 @@ export function buildExtractPrompt(userText, assistantText, now = new Date()) {
 4. 只输出 JSON 数组，不要解释。
 
 今天是：${nowStr}
+
+已有相关记忆（用于判断新增还是更新）：
+${existingMemories.length ? existingMemories.map((m) => `- [${m.type}/${m.category}] ${m.subject}/${m.relation}: ${m.content}`).join('\\n') : '（暂无）'}
 
 对话：
 用户：${userText}
@@ -87,8 +90,28 @@ export function parseCards(raw, now = Date.now()) {
 
 function parseDue(value, now) {
   if (!value) return 0
-  const t = Date.parse(String(value))
-  if (Number.isNaN(t)) return 0
-  // ensure a sensible future deadline; past-only dates clamp to today
-  return t > 0 ? t : 0
+  const raw = String(value).trim()
+  const t = Date.parse(raw)
+  if (!Number.isNaN(t)) return t
+  const base = new Date(now)
+  const m = raw.match(/^(?:第)?([一二三四五六七八九十\d]+)天后$/)
+  if (m) return base.getTime() + Number(toNumber(m[1])) * 86400000
+  if (raw === '明天') return base.getTime() + 86400000
+  if (raw === '后天') return base.getTime() + 2 * 86400000
+  const weekday = {'周一':1,'周二':2,'周三':3,'周四':4,'周五':5,'周六':6,'周日':0,'星期一':1,'星期二':2,'星期三':3,'星期四':4,'星期五':5,'星期六':6,'星期日':0}[raw]
+  if (weekday !== undefined) {
+    const days = (weekday - base.getDay() + 7) % 7 || 7
+    return base.getTime() + days * 86400000
+  }
+  const nextWeek = raw.match(/^下周([一二三四五六日天])$/)
+  if (nextWeek) {
+    const target = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'日':0,'天':0}[nextWeek[1]]
+    const days = 7 + ((target - base.getDay() + 7) % 7)
+    return base.getTime() + days * 86400000
+  }
+  return 0
+}
+function toNumber(value) {
+  const map = {一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10}
+  return map[value] || Number(value) || 0
 }
