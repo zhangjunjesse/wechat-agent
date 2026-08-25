@@ -8,6 +8,7 @@ export class MemoryManager {
     if (!extractor) throw new TypeError('extractor is required')
     this.#store = store; this.#extractor = extractor; this.#now = now; this.#maxRecallTokens = maxRecallTokens
   }
+  get store() { return this.#store }
   recall(userId) {
     const cards = this.#store.list(userId)
     if (!cards.length) return ''
