@@ -1,69 +1,68 @@
 import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import path from 'node:path'
+import { estimateMessagesTokens } from './tokenizer.mjs'
 
 /** Persistent per-user agent session store backed by SQLite (node:sqlite).
  *
- * Each user has one logical session: an ordered JSON array of {role,content}
- * messages plus an optional summary of already-folded early turns. Keeps at
- * most `maxTurns` recent turns; older turns are folded into a summary so the
- * context window stays bounded and cost stays predictable.
+ * Follows Claude Code's context-engineering model:
+ *   - `transcript` keeps the FULL raw history (never dropped);
+ *   - `summary` holds an LLM-generated fold of already-compacted early turns;
+ *   - a cheap token estimate drives WHEN to fold (by ratio, not turn count).
+ *
+ * The store itself only persists. The decision to fold, and the LLM call that
+ * produces the summary, live in the agent layer so this class stays dependency-free.
  */
 export class SessionStore {
   #db
-  #maxTurns
 
-  constructor({ file = path.resolve('data/sessions.db'), maxTurns = 40 } = {}) {
+  constructor({ file = path.resolve('data/sessions.db') } = {}) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     this.#db = new DatabaseSync(file)
-    this.#maxTurns = maxTurns
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
-        user_id   TEXT PRIMARY KEY,
-        summary   TEXT NOT NULL DEFAULT '',
-        messages  TEXT NOT NULL DEFAULT '[]',
-        updated_at INTEGER NOT NULL DEFAULT 0
+        user_id         TEXT PRIMARY KEY,
+        transcript      TEXT NOT NULL DEFAULT '[]',
+        summary         TEXT NOT NULL DEFAULT '',
+        token_estimate  INTEGER NOT NULL DEFAULT 0,
+        updated_at      INTEGER NOT NULL DEFAULT 0
       );
     `)
   }
 
   get(userId) {
-    const row = this.#db.prepare('SELECT summary, messages, updated_at FROM sessions WHERE user_id = ?').get(String(userId))
-    if (!row) return { summary: '', messages: [], updatedAt: 0 }
-    return { summary: row.summary || '', messages: safeJson(row.messages, []), updatedAt: Number(row.updated_at || 0) }
+    const row = this.#db.prepare('SELECT transcript, summary, token_estimate, updated_at FROM sessions WHERE user_id = ?').get(String(userId))
+    if (!row) return { transcript: [], summary: '', tokenEstimate: 0, updatedAt: 0 }
+    return { transcript: safeJson(row.transcript, []), summary: row.summary || '', tokenEstimate: Number(row.token_estimate || 0), updatedAt: Number(row.updated_at || 0) }
   }
 
-  /** Append a user+assistant turn, then enforce the truncation window. */
+  /** Append one user+assistant turn to the full transcript. Never drops. */
   append(userId, userText, assistantText) {
     const cur = this.get(userId)
-    const messages = [...cur.messages, { role: 'user', content: userText }, { role: 'assistant', content: assistantText }]
-    let summary = cur.summary || ''
-    if (messages.length > this.#maxTurns) {
-      const dropped = messages.length - this.#maxTurns
-      const droppedText = messages.slice(0, dropped).map((m) => `${m.role}: ${m.content}`).join('\n').slice(0, 1200)
-      summary = [summary, `[已折叠早期对话 ${dropped} 轮] ${droppedText}`].filter(Boolean).join('\n').slice(0, 2000)
-      messages.splice(0, dropped)
-    }
-    this.#write(userId, summary, messages)
-    return { summary, messages: [...messages] }
+    const transcript = [...cur.transcript, { role: 'user', content: userText }, { role: 'assistant', content: assistantText }]
+    this.#write(userId, cur.summary, transcript)
+    return { transcript: [...transcript], summary: cur.summary, tokenEstimate: estimateMessagesTokens(transcript) }
   }
 
-  putSummary(userId, summary) {
-    const cur = this.get(userId)
-    const next = (cur.summary ? cur.summary + '\n' : '') + summary
-    this.#write(userId, next, cur.messages)
-    return { summary: next, messages: [...cur.messages] }
+  /** Fold: keep `keptTranscript` (recent turns) and replace the summary with
+   * a fresh LLM-generated one. The pre-fold history is dropped from the active
+   * transcript only — archived retention is intentionally out of scope. */
+  fold(userId, summary, keptTranscript) {
+    this.#write(userId, summary, keptTranscript || [])
+    return { transcript: [...(keptTranscript || [])], summary }
   }
 
-  #write(userId, summary, messages) {
+  #write(userId, summary, transcript) {
+    const tokenEstimate = estimateMessagesTokens(transcript)
     this.#db.prepare(`
-      INSERT INTO sessions (user_id, summary, messages, updated_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO sessions (user_id, transcript, summary, token_estimate, updated_at)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
+        transcript = excluded.transcript,
         summary = excluded.summary,
-        messages = excluded.messages,
+        token_estimate = excluded.token_estimate,
         updated_at = excluded.updated_at
-    `).run(String(userId), summary, JSON.stringify(messages), Date.now())
+    `).run(String(userId), JSON.stringify(transcript), summary, tokenEstimate, Date.now())
   }
 }
 
