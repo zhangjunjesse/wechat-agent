@@ -8,4 +8,6 @@ credentials/
 assistant-qr.jpg
 data/*.json
 data/*.db
+data/*.db-wal
+data/*.db-shm
 deploy/*.tgz
