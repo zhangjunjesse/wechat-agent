@@ -1,4 +1,5 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createApp, listen } from './app.mjs'
 import { ILinkProvider } from './providers/ilink-provider.mjs'
@@ -9,6 +10,7 @@ import { MemoryStore } from './services/memory-store.mjs'
 import { MemoryManager } from './llm/memory-manager.mjs'
 import { MemoryExtractor } from './llm/memory-extractor.mjs'
 import { SkillRegistry } from './skills/skill-registry.mjs'
+import { WechatLogStore } from './services/wechat-log-store.mjs'
 import { buildTools } from './tools/index.mjs'
 
 const provider = new ILinkProvider()
@@ -32,7 +34,15 @@ const memoryManager = new MemoryManager({
   } }),
 })
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch })
+// Read-only direct SQLite access to the WeChat sync receiver's DB (mounted
+// read-only into this container — see ADR-0007). Optional: omitted when not
+// configured (local dev, tests, or before the mount is set up) rather than
+// crashing the whole server.
+const wechatLogDbFile = process.env.WECHAT_LOG_DB || ''
+const wechatLogStore = wechatLogDbFile && fs.existsSync(wechatLogDbFile) ? new WechatLogStore({ file: wechatLogDbFile }) : null
+if (wechatLogDbFile && !wechatLogStore) console.warn(`WECHAT_LOG_DB=${wechatLogDbFile} not found; wechat_* tools disabled`)
+
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-chat', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined

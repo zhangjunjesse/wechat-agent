@@ -50,3 +50,16 @@ export function beijingMidnight(ms = Date.now()) {
 export function beijingWeekday(ms = Date.now()) {
   return beijingParts(ms).weekday
 }
+
+/** Parse `YYYY-MM-DD HH:mm` or `YYYY-MM-DD` (Beijing wall-clock) into an
+ * absolute epoch ms. A date-only string defaults to 00:00, or 23:59 when
+ * `endOfDay` is set (for inclusive end-of-range queries). Returns null for
+ * anything else — callers decide their own fallback for missing/invalid input. */
+export function beijingParse(str, { endOfDay = false } = {}) {
+  const m = String(str || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?$/)
+  if (!m) return null
+  const [, y, mo, d, h, mi] = m
+  const hour = h != null ? Number(h) : (endOfDay ? 23 : 0)
+  const minute = mi != null ? Number(mi) : (endOfDay ? 59 : 0)
+  return Date.UTC(Number(y), Number(mo) - 1, Number(d), hour, minute) - BEIJING_OFFSET_MS
+}
