@@ -23,7 +23,10 @@ export class MemoryManager {
     ]
     const lines = ['[用户长期记忆]']
     for (const section of sections) {
-      const group = cards.filter((c) => c.category === section.category).sort((a, b) => b.updatedAt - a.updatedAt)
+      let group = cards.filter((c) => c.category === section.category)
+      // 助手命名由 assistantName() 单独承载，不在记忆正文重复展示，避免两处冲突
+      if (section.category === 'identity') group = group.filter((c) => c.subject !== '助手')
+      group.sort((a, b) => b.updatedAt - a.updatedAt)
       if (!group.length) continue
       const header = `【${section.label}】`
       if (estimateTokens([...lines, header].join('\n')) > this.#maxRecallTokens) break
@@ -35,6 +38,17 @@ export class MemoryManager {
       }
     }
     return lines.join('\n')
+  }
+  /** 助手的自称名，单一来源：记忆里用户设定的命名（identity / subject=助手），
+   * 没有则回退默认 '助手'。不再有第二个来源（避免与系统提示词硬编码冲突）。 */
+  assistantName(userId) {
+    const cards = this.#store.list(userId)
+      .filter((c) => c.category === 'identity' && c.subject === '助手')
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+    const latest = cards[0]
+    if (!latest) return '助手'
+    const m = String(latest.content || '').match(/助手(?:命名为|改名为|叫|名为)(.+)/)
+    return m ? m[1].trim().replace(/[，。,.!！?？\s]/g, '') : '助手'
   }
   async absorb(userId, userText, assistantText) {
     let cards = []

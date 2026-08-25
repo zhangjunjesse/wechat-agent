@@ -28,7 +28,12 @@ export function buildBaseInstructions({ skillCatalog = '' } = {}) {
  *
  * Order follows the agreed layering: (safety/role behavior live in the static
  * instructions above) then assistant name → user identity → time → memory →
- * summary. */
+ * summary.
+ *
+ * `assistantName` is the single source of truth for how the assistant calls
+ * itself, resolved from memory (user's naming) by the caller, falling back to
+ * '助手'. It must NOT be read from a second place (e.g. profile) — that caused
+ * a self-naming conflict. */
 export function buildDynamicSystem({ nickname = '', assistantName = '助手', memories = '', summary = '', nowMs = Date.now() } = {}) {
   const lines = []
   lines.push(`你的名字是${assistantName}。`)

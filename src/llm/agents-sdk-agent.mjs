@@ -47,7 +47,7 @@ export class AgentsSdkAgent {
     const memories = this.#memory.recall(userId)
     const context = buildDynamicSystem({
       nickname: profile?.nickname || '',
-      assistantName: profile?.assistantName || '助手',
+      assistantName: this.#memory.assistantName(userId),
       memories,
       summary: session.summary || '',
       nowMs: Date.now(),

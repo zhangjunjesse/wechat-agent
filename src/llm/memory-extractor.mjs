@@ -34,6 +34,8 @@ export function buildExtractPrompt(userText, assistantText, now = new Date(), ex
 - fact：稳定事实（拥有的物品、家庭成员、健康情况）
 - todo：待办事项或计划
 
+当用户给助手（你）起名或改名时（例如"以后你就叫小新"），提取为一条 identity 记忆：subject='助手'、relation='助手'、content='助手命名为{名字}'。
+
 每条记忆输出格式（JSON）：
 {"action":"add|update","type":"episodic|semantic","category":"identity|preference|fact|todo","subject":"主体(默认'用户')","relation":"与用户的关系(默认'本人')","content":"简洁事实","context":"这条信息的叙事背景(一句话,说明是在什么情境下得知的)","due":"todo的截止日期(YYYY-MM-DD,非todo留空)"}
 

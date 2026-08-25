@@ -163,11 +163,11 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
   会话折叠摘要（token 比例触发 + LLM 摘要）
   长期记忆（JSON 卡片 + LLM 提取 + 冲突解决）
   系统提示词分层（安全/角色/身份/时间/记忆/摘要）
+  角色名对话命名（记忆驱动，单一来源，默认"助手"）
   工具（文件/网络/待办/时间/技能/澄清）+ 技能目录
   东八区时间（services/time.mjs）
 
 下一步（推荐）
-  + 每用户人设/称呼自定义入口（profile.assistantName 设置）
   + 微信聊天记录工具（读取本人 vs @用户）
   + 审计日志、费用统计
 

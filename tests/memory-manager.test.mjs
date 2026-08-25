@@ -67,3 +67,27 @@ test('time awareness: todo gets relative due days', () => {
   assert.match(relativeDue(Date.parse('2026-08-20'), now), /已过期/)
   assert.match(fmtDate(Date.parse('2026-09-01')), /2026-09-01/)
 })
+
+test('assistantName reads the user-assigned name from memory, defaults to 助手', () => {
+  const file = path.join(os.tmpdir(), `mm-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  try {
+    const store = new MemoryStore({ file })
+    const manager = new MemoryManager({ store, extractor: new MemoryExtractor({ complete: async () => '[]' }), now: () => new Date() })
+    assert.equal(manager.assistantName('u1'), '助手')
+    store.upsert('u1', { type: 'semantic', category: 'identity', subject: '助手', relation: '助手', content: '助手命名为小新' })
+    assert.equal(manager.assistantName('u1'), '小新')
+  } finally { try { fs.rmSync(file, { force: true }) } catch (e) {} }
+})
+
+test('recall hides assistant naming (carried by assistantName, not duplicated)', () => {
+  const file = path.join(os.tmpdir(), `mm-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  try {
+    const store = new MemoryStore({ file })
+    const manager = new MemoryManager({ store, extractor: new MemoryExtractor({ complete: async () => '[]' }), now: () => new Date() })
+    store.upsert('u1', { type: 'semantic', category: 'identity', subject: '助手', relation: '助手', content: '助手命名为小新' })
+    store.upsert('u1', { type: 'semantic', category: 'identity', subject: '用户', content: '用户称呼为张工' })
+    const recall = manager.recall('u1')
+    assert.doesNotMatch(recall, /小新/)
+    assert.match(recall, /张工/)
+  } finally { try { fs.rmSync(file, { force: true }) } catch (e) {} }
+})
