@@ -48,7 +48,7 @@ export function buildExtractPrompt(userText, assistantText, now = new Date(), ex
 今天是：${nowStr}
 
 已有相关记忆（用于判断新增还是更新）：
-${existingMemories.length ? existingMemories.map((m) => `- [${m.type}/${m.category}] ${m.subject}/${m.relation}: ${m.content}`).join('\\n') : '（暂无）'}
+${existingMemories.length ? existingMemories.map((m) => `- [${m.type}/${m.category}] ${m.subject}/${m.relation}: ${m.content}`).join('\n') : '（暂无）'}
 
 对话：
 用户：${userText}
