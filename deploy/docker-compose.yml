@@ -9,3 +9,6 @@ services:
     volumes:
       - ./data:/data
       - ../assistant-qr.jpg:/app/assistant-qr.jpg:ro
+      # Read-only access to the wechat-sync receiver's SQLite DB (same host,
+      # sibling container) for the wechat-search skill — see ADR-0007.
+      - /opt/wechat-sync/data:/wechat-sync-data:ro
