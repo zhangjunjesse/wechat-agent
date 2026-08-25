@@ -12,8 +12,7 @@ const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./servi
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
 const sessionStore = new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
 const memoryStore = new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' })
-const historyProvider = process.env.WECHAT_SYNC_ACCESS_KEY ? async (userId, profile) => verifier?.recentForProfile(profile) : null
-const sessionOpts = { historyProvider, sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
+const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? (process.env.AGENT_SDK === 'openai' ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'gpt-4o-mini', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts }) : new OpenAICompatibleAgent({ baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL || 'gpt-4o-mini', contextProvider: async (userId) => profileStore.get(userId), ...sessionOpts })) : undefined
 process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const app = createApp({ provider, store, verifier, profileStore, agent })

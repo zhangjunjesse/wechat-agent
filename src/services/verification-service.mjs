@@ -18,7 +18,14 @@ export class VerificationService {
     task.attempts++
     const result = await this.#verifier.checkTask(task)
     this.#tasks.set(id, result)
-    if (result.status === 'verified') { this.#profiles.set(userId, result.profile); await this.#store?.put(userId, result.profile); await this.#onVerified?.({ userId, task, profile: result.profile }) }
+    if (result.status === 'verified') {
+      // Persist the stable iLink identity so memory/sessions follow the WeChat
+      // user across browser sessions (which get a fresh random userId each time).
+      const profile = { ...result.profile, ilinkUserId: task.ilinkUserId || '' }
+      this.#profiles.set(userId, profile)
+      await this.#store?.put(userId, profile)
+      await this.#onVerified?.({ userId, task, profile })
+    }
     return publicTask(result)
   }
   profile(userId) { return this.#profiles.get(userId) || null }

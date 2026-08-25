@@ -11,7 +11,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
   const owned = []
   let polling
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
-  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (userId) => profileStore?.get(userId) })
+  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)) })
   const verification = verifier ? new VerificationService({ verifier, store: profileStore }) : null
   polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
   void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch(() => {})

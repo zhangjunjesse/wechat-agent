@@ -11,13 +11,12 @@ export class OpenAICompatibleAgent {
   #model
   #sessions
   #context
-  #historyProvider
   #compactor
   #memory
 
-  constructor({ fetchImpl = globalThis.fetch, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, model = 'gpt-4o-mini', contextProvider = null, historyProvider = null, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30 } = {}) {
+  constructor({ fetchImpl = globalThis.fetch, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, model = 'gpt-4o-mini', contextProvider = null, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30 } = {}) {
     if (typeof fetchImpl !== 'function' || !apiKey) throw new TypeError('fetchImpl and apiKey are required')
-    this.#fetch = fetchImpl; this.#baseUrl = baseUrl.replace(/\/$/, ''); this.#apiKey = apiKey; this.#model = model; this.#context = contextProvider; this.#historyProvider = historyProvider
+    this.#fetch = fetchImpl; this.#baseUrl = baseUrl.replace(/\/$/, ''); this.#apiKey = apiKey; this.#model = model; this.#context = contextProvider
     this.#sessions = sessionStore || new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
     this.#compactor = new SessionCompactor({ summarize: async (turns) => this.#summarize(turns), tokenBudget, threshold, keepTurns })
     this.#memory = new MemoryManager({ store: memoryStore || new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' }), extractor: new MemoryExtractor({ complete: (messages, opts) => this.#complete(messages, opts) }) })
@@ -45,10 +44,10 @@ export class OpenAICompatibleAgent {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const session = this.#sessions.get(userId)
     const context = await this.#context?.(userId)
-    const recentWechat = await this.#historyProvider?.(userId, context) || []
-    const historyContext = recentWechat.map((m) => `[${m.chat || '微信'}][${m.sender_display || ''}] ${m.content || ''}`).join('\n')
+    // WeChat history is not injected into every prompt. It will become an
+    // explicit Agent tool for on-demand, least-privilege retrieval.
     const memories = this.#memory.recall(userId)
-    const system = `你是一个微信个人助手。请用中文简洁回答。当前用户昵称：${context?.nickname || '未知'}，微信wxid：${context?.wxid || '未知'}。如需使用聊天记录，先按昵称/wxid识别用户本人消息，并明确区分本人发送与@用户内容。\n${this.#memory.nowLine()}\n${memories}\n${session.summary ? '此前对话要点：\n' + session.summary + '\n' : ''}以下是已同步的相关聊天记录：\n${historyContext || '暂无相关记录'}`
+    const system = `你是一个微信个人助手。请用中文简洁回答。当前用户昵称：${context?.nickname || '未知'}，微信wxid：${context?.wxid || '未知'}。如需使用聊天记录，先按昵称/wxid识别用户本人消息，并明确区分本人发送与@用户内容。\n${this.#memory.nowLine()}\n${memories}\n${session.summary ? '此前对话要点：\n' + session.summary + '\n' : ''}微信聊天记录不会自动注入；只有用户明确请求时，才通过专用工具查询。`
     const messages = [{ role: 'system', content: system }, ...session.transcript, { role: 'user', content: text }]
     const response = await this.#fetch(`${this.#baseUrl}/chat/completions`, { method: 'POST', headers: this.#headers(), body: JSON.stringify({ model: this.#model, messages, temperature: 0.3 }) })
     if (!response.ok) throw new Error(`LLM request failed: ${response.status}`)
