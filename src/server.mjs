@@ -1,3 +1,5 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createApp, listen } from './app.mjs'
 import { ILinkProvider } from './providers/ilink-provider.mjs'
 import { BindingStore } from './services/binding-store.mjs'
@@ -15,7 +17,10 @@ const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./servi
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
 const sessionStore = new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
 const memoryStore = new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' })
-const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || 'skills' })
+// Resolve skills relative to the source tree (repo root / container /app),
+// independent of process CWD, so the declarative skills/ dir is always found.
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || path.resolve(__dirname, '..', 'skills') })
 
 // MemoryManager needs an extractor that talks to the same LLM the agent uses.
 const llm = new (await import('openai')).default({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' })
