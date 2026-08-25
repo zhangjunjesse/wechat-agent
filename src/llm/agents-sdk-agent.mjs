@@ -12,18 +12,20 @@ export class AgentsSdkAgent {
   #compactor
   #llm
   #memory
+  #skillRegistry
   #makeAgent
 
-  constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillCatalog = '' }) {
+  constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillRegistry = null }) {
     const client = new OpenAI({ apiKey, baseURL: baseUrl })
     this.#llm = client
     const sdkModel = new OpenAIChatCompletionsModel(client, model)
+    this.#skillRegistry = skillRegistry
     // Agent is a stateless definition; build one per call so tools can carry
-    // per-user sandboxing through run context (ctx.context.userId).
-    // Safety rules + role behavior + skill catalog are static instructions;
-    // identity/time/memory/summary are injected per-turn via buildDynamicSystem.
-    const baseInstructions = buildBaseInstructions({ skillCatalog })
-    this.#makeAgent = () => new Agent({ name: '微信个人助手', model: sdkModel, instructions: baseInstructions, tools })
+    // per-user sandboxing through run context (ctx.context.userId), and so the
+    // skill catalog in instructions can vary per user (per-user skill isolation).
+    // Safety rules + role behavior are fixed; the skill catalog is computed
+    // per-turn in respond() from that user's enabled + private skills.
+    this.#makeAgent = (instructions) => new Agent({ name: '微信个人助手', model: sdkModel, instructions, tools })
     this.#sessions = sessionStore || new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
     this.#compactor = new SessionCompactor({ summarize: async (turns) => this.#summarize(turns), tokenBudget, threshold, keepTurns })
     this.#memory = new MemoryManager({ store: memoryStore || new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' }), extractor: new MemoryExtractor({ complete: (messages, opts) => this.#complete(messages, opts) }) })
@@ -52,7 +54,10 @@ export class AgentsSdkAgent {
       summary: session.summary || '',
       nowMs: Date.now(),
     })
-    const result = await run(this.#makeAgent(), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile } })
+    const enabledGlobal = this.#skillRegistry?.resolveEnabled(profile?.enabledSkills)
+    const skillCatalog = this.#skillRegistry?.catalogText(userId, enabledGlobal) || ''
+    const instructions = buildBaseInstructions({ skillCatalog })
+    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
     let { transcript } = this.#sessions.append(userId, text, answer)

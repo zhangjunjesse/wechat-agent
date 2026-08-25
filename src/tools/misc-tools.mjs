@@ -17,9 +17,11 @@ export function miscTools({ skillRegistry }) {
     name: 'use_skill',
     description: '加载一个已注册技能的详细指令（当用户需求匹配某个技能时使用）',
     parameters: { type: 'object', properties: { name: { type: 'string', description: '技能名' } }, required: ['name'] },
-    execute: async (input) => {
-      const skill = skillRegistry.get(input.name)
-      return skill ? `【技能 ${skill.name}】${skill.instructions}` : `技能「${input.name}」不存在。可用：${skillRegistry.list().map((s) => s.name).join(', ') || '无'}`
+    execute: async (input, ctx) => {
+      const userId = ctx?.context?.userId
+      const enabledGlobal = skillRegistry.resolveEnabled(ctx?.context?.profile?.enabledSkills)
+      const skill = skillRegistry.get(userId, input.name, enabledGlobal)
+      return skill ? `【技能 ${skill.name}】${skill.instructions}` : `技能「${input.name}」不存在。可用：${skillRegistry.list(userId, enabledGlobal).map((s) => s.name).join(', ') || '无'}`
     },
   })
 

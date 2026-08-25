@@ -165,9 +165,11 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
   系统提示词分层（安全/角色/身份/时间/记忆/摘要）
   角色名对话命名（记忆驱动，单一来源，默认"助手"）
   工具（文件/网络/待办/时间/技能/澄清）+ 技能目录
+  技能按用户隔离（全局技能 + 私有技能，物理分目录，见 ADR-0005）
   东八区时间（services/time.mjs）
 
 下一步（推荐）
+  + create_skill 工具：用户通过对话创建自己的私有技能
   + 微信聊天记录工具（读取本人 vs @用户）
   + 审计日志、费用统计
 
@@ -187,6 +189,7 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
 | 系统提示词分层 | `llm/system-prompt.mjs` | ✅ |
 | 会话状态 | `services/session-store.mjs`（SQLite） | ✅ |
 | 长期记忆 | `services/memory-store.mjs` + `llm/memory-manager.mjs` | ✅ |
-| 工具/技能 | `tools/*` + `skills/*` | ✅ |
+| 工具/技能 | `tools/*` + `skills/*` + `skills/skill-registry.mjs` | ✅ |
+| 私有技能隔离 | `services` 同构：`data/user-skills/<userId>/` | ✅ |
 | 时间（东八区） | `services/time.mjs` | ✅ |
 | 数据层 | SQLite（sessions/memories）+ JSON（bindings/profiles） | ✅ |

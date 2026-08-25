@@ -10,4 +10,6 @@ data/*.json
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/user-files/
+data/user-skills/
 deploy/*.tgz
