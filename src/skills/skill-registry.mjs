@@ -74,7 +74,7 @@ export class SkillRegistry {
   catalogText(userId, enabledGlobal = this.#defaultEnabled) {
     const list = this.list(userId, enabledGlobal)
     if (!list.length) return ''
-    return '可用技能（用户提到相关需求时可调用 skill 工具加载）：\n' + list.map((s) => `- ${s.name}: ${s.description}`).join('\n')
+    return '可用技能（下面只是名字+一句话描述；一旦用户需求匹配某一项，必须先调用 use_skill 工具加载该技能完整指令再执行，不得凭猜测直接执行，也不得只是提到技能名却不实际调用）：\n' + list.map((s) => `- ${s.name}: ${s.description}`).join('\n')
   }
 }
 

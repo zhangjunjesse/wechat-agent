@@ -57,7 +57,10 @@ export class AgentsSdkAgent {
     const enabledGlobal = this.#skillRegistry?.resolveEnabled(profile?.enabledSkills)
     const skillCatalog = this.#skillRegistry?.catalogText(userId, enabledGlobal) || ''
     const instructions = buildBaseInstructions({ skillCatalog })
-    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile } })
+    // loadedSkills is a fresh Set per turn: use_skill uses it to avoid
+    // re-returning the same skill's full instructions if the model calls it
+    // more than once while working through one user message.
+    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set() } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
     let { transcript } = this.#sessions.append(userId, text, answer)
