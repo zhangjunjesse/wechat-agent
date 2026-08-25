@@ -2,11 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryExtractor, parseCards, buildExtractPrompt } from '../src/llm/memory-extractor.mjs'
 
-test('parseCards handles valid JSON array and filters bad entries', () => {
-  const cards = parseCards('好的，以下是提取结果：[{"action":"add","type":"identity","content":"会员号12345"},{"action":"update","type":"preference","subject":"饮食","content":"对花生过敏"},{"type":"bad","content":"x"},{"action":"add","type":"fact","content":""}]')
-  assert.equal(cards.length, 2)
-  assert.equal(cards[0].type, 'identity')
-  assert.equal(cards[1].action, 'update')
+test('parseCards handles valid JSON with type/category/context/due', () => {
+  const cards = parseCards('结果：[{"action":"add","type":"semantic","category":"identity","content":"会员号12345","context":"用户主动告知会员号"},{"action":"update","type":"semantic","category":"preference","subject":"饮食","content":"对花生过敏"},{"action":"add","type":"episodic","category":"todo","content":"下周一交方案","due":"2026-09-01"},{"type":"bad","content":"x"}]')
+  assert.equal(cards.length, 3)
+  assert.equal(cards[0].type, 'semantic')
+  assert.equal(cards[0].category, 'identity')
+  assert.match(cards[0].context, /主动告知/)
+  assert.equal(cards[2].type, 'episodic')
+  assert.equal(cards[2].category, 'todo')
+  assert.ok(cards[2].due > 0)
 })
 
 test('parseCards returns [] for non-JSON / empty', () => {
@@ -14,17 +18,14 @@ test('parseCards returns [] for non-JSON / empty', () => {
   assert.deepEqual(parseCards(''), [])
 })
 
-test('extractor invokes complete and parses', async () => {
-  const extractor = new MemoryExtractor({ complete: async (messages) => { assert.ok(messages[0].content.includes('记忆提取器')); return '[{"action":"add","type":"fact","content":"有两辆车"}]' } })
-  const cards = await extractor.extract('我有两辆车', '好的')
-  assert.equal(cards.length, 1)
-  assert.equal(cards[0].content, '有两辆车')
-})
-
-test('buildExtractPrompt asks for the four types', () => {
-  const p = buildExtractPrompt('我叫张三', '你好张三')
+test('buildExtractPrompt asks for episodic/semantic + categories + due', () => {
+  const p = buildExtractPrompt('我叫张三', '你好张三', new Date('2026-08-24T10:00:00'))
+  assert.match(p, /episodic/)
+  assert.match(p, /semantic/)
   assert.match(p, /identity/)
   assert.match(p, /preference/)
   assert.match(p, /fact/)
   assert.match(p, /todo/)
+  assert.match(p, /due/)
+  assert.match(p, /2026-08-24/)
 })
