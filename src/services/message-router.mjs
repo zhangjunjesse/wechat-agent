@@ -41,7 +41,13 @@ export class MessageRouter {
       await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })
       return { accepted: true, gated: true }
     }
-    const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text, profile })
+    // Channel context lets tools (e.g. send_file, ADR-0009) act back through
+    // THIS specific WeChat session — providerBotId/contextToken are per-
+    // conversation and only known here at the routing layer, never inside
+    // the agent itself. Web chat calls agent.respond() with no channel at
+    // all, so tools that need it degrade gracefully (see wechat-send-tools.mjs).
+    const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
+    const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text, profile, channel })
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
     const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })

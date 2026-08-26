@@ -27,8 +27,8 @@ OPENAI_MODEL=deepseek-chat
 AGENT_SDK=openai
 WECHAT_SYNC_BASE_URL=https://datadefender.cn
 WECHAT_SYNC_ACCESS_KEY=...
-# 供 write_file / run_code 生成的文件下载链接使用（见 ADR-0008），
-# 微信通道没有发文件能力，网页也没有浏览页面，链接是用户拿到文件的唯一方式。
+# 供 write_file / run_code 生成的文件下载链接使用（见 ADR-0008）——网页对话唯一的
+# 交付方式，也是微信对话下 send_file（ADR-0009，真实文件消息）失败时的兜底。
 PUBLIC_BASE_URL=https://datadefender.cn
 DOWNLOAD_TOKEN_TTL_MS=86400000
 ```

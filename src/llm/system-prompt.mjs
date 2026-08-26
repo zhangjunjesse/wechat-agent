@@ -13,16 +13,17 @@ export const SAFETY_RULES = [
 ]
 
 /** Tool-usage rules injected into the static instructions, right after
- * safety rules. These target two concrete, observed failure modes (see
- * ADR-0008), not hypothetical ones:
+ * safety rules. These target concrete, observed failure modes, not
+ * hypothetical ones (see ADR-0008, ADR-0009):
  *   1. Asked to filter/dedupe/count a batch of pasted records, the model
  *      manually enumerated them in prose and miscounted mid-reasoning.
- *   2. The model said "我把文件写好给你" when there was no channel that
- *      could ever actually deliver a file to a WeChat user — a promise it
- *      could not keep. */
+ *   2/3. The model said "我把文件写好给你" with no way to check whether a
+ *      real delivery action (send_file) actually happened or was even
+ *      possible on the current channel — a promise it could not verify. */
 export const TOOL_USAGE_RULES = [
   '1. 涉及多条记录的筛选、去重、计数、排序等批量数据处理，必须用 run_code 工具跑代码得出结果，不要在回复里手动逐条核对——人工数数容易数错。',
-  '2. write_file 或 run_code 生成的文件，只有工具返回的下载链接能让用户真正拿到——微信不支持机器人发文件，网页也没有文件浏览页面。有下载链接就把链接原样发给用户；没有链接就不要说"已经发给你""我把文件发过去了"这类无法兑现的话。',
+  '2. 生成文件后，如果当前是微信对话，优先用 send_file 把文件作为真实的微信文件消息发给用户；send_file 提示"不是微信对话"时，改用 write_file 返回的下载链接。',
+  '3. 不要说"已经发给你""文件发过去了"这类话，除非确实调用过 send_file 且成功，或者确实把下载链接发给了用户——工具没返回对应结果就不要这样说。',
 ]
 
 /** Static instructions: safety rules + tool-usage rules + role behavior + skill catalog. */

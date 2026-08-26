@@ -1,6 +1,11 @@
 import crypto from 'node:crypto'
+import { aesEcbPaddedSize, uploadBufferToCdn } from '../services/ilink-cdn.mjs'
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
+// MessageItemType.FILE / UploadMediaType.FILE from the iLink bot protocol
+// (see ADR-0009) — sendText already uses MessageItemType.TEXT (1) inline.
+const ITEM_TYPE_FILE = 4
+const MEDIA_TYPE_FILE = 3
 const APP_ID = 'bot'
 const CLIENT_VERSION = '131336' // 2.1.8
 
@@ -71,6 +76,47 @@ export class ILinkProvider {
     if (!contextToken) throw new Error('iLink contextToken is required to send')
     const clientId = `ilink-${this.#now()}-${crypto.randomBytes(4).toString('hex')}`
     const result = await this.#post(session, 'ilink/bot/sendmessage', { msg: { from_user_id: '', to_user_id: toProviderUserId, client_id: clientId, message_type: 2, message_state: 2, context_token: contextToken, item_list: [{ type: 1, text_item: { text: String(text) } }] } })
+    if (result.ret && result.ret !== 0) throw new Error(`iLink send failed: ${result.ret}`)
+    return { providerMessageId: clientId }
+  }
+
+  /** Send a file attachment (any type — docx/xlsx/pdf/csv/zip/...). Uploads
+   * `buffer` to the iLink CDN (AES-128-ECB encrypted, per protocol — see
+   * services/ilink-cdn.mjs + ADR-0009) then sends a FILE-type message item
+   * referencing it. Any file type works here: WeChat's "file" attachment
+   * doesn't care about content, only image/video get their own richer item
+   * types (not implemented — see ADR-0009 for why that's out of scope). */
+  async sendFile({ providerBotId, toProviderUserId, contextToken, fileName, buffer }) {
+    const session = this.#find(providerBotId)
+    if (!session) throw new Error('bound session not available')
+    if (!contextToken) throw new Error('iLink contextToken is required to send')
+    if (!Buffer.isBuffer(buffer)) throw new TypeError('buffer must be a Buffer')
+
+    const rawsize = buffer.length
+    const rawfilemd5 = crypto.createHash('md5').update(buffer).digest('hex')
+    const filesize = aesEcbPaddedSize(rawsize)
+    const filekey = crypto.randomBytes(16).toString('hex')
+    const aeskey = crypto.randomBytes(16)
+
+    const uploadUrlResp = await this.#post(session, 'ilink/bot/getuploadurl', {
+      filekey, media_type: MEDIA_TYPE_FILE, to_user_id: toProviderUserId,
+      rawsize, rawfilemd5, filesize, no_need_thumb: true, aeskey: aeskey.toString('hex'),
+    })
+    if (!uploadUrlResp.upload_param) throw new Error(`iLink getuploadurl returned no upload_param: ${JSON.stringify(uploadUrlResp)}`)
+
+    const { downloadParam } = await uploadBufferToCdn({ fetchImpl: this.#fetch, buf: buffer, uploadParam: uploadUrlResp.upload_param, filekey, aeskey })
+
+    const clientId = `ilink-${this.#now()}-${crypto.randomBytes(4).toString('hex')}`
+    const result = await this.#post(session, 'ilink/bot/sendmessage', {
+      msg: {
+        from_user_id: '', to_user_id: toProviderUserId, client_id: clientId,
+        message_type: 2, message_state: 2, context_token: contextToken,
+        item_list: [{
+          type: ITEM_TYPE_FILE,
+          file_item: { media: { encrypt_query_param: downloadParam, aes_key: aeskey.toString('base64'), encrypt_type: 1 }, file_name: fileName, len: String(rawsize) },
+        }],
+      },
+    })
     if (result.ret && result.ret !== 0) throw new Error(`iLink send failed: ${result.ret}`)
     return { providerMessageId: clientId }
   }

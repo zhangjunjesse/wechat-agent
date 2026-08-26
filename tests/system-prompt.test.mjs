@@ -10,11 +10,12 @@ test('base instructions carry safety rules, tool-usage rules, role behavior and 
   assert.match(base, /demo: 演示/)
   assert.match(base, /工具使用规则/)
   assert.match(base, /run_code/)
+  assert.match(base, /send_file/)
   assert.match(base, /已经发给你/)
 })
 
-test('tool usage rules are a non-empty list of 2', () => {
-  assert.equal(TOOL_USAGE_RULES.length, 2)
+test('tool usage rules are a non-empty list of 3', () => {
+  assert.equal(TOOL_USAGE_RULES.length, 3)
 })
 
 test('dynamic system layers role name, identity, time, memory and summary in order', () => {

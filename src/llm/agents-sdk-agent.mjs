@@ -43,7 +43,7 @@ export class AgentsSdkAgent {
     return (resp.choices?.[0]?.message?.content || '').trim()
   }
 
-  async respond({ userId, text, profile }) {
+  async respond({ userId, text, profile, channel = null }) {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const session = this.#sessions.get(userId)
     const memories = this.#memory.recall(userId)
@@ -60,7 +60,7 @@ export class AgentsSdkAgent {
     // loadedSkills is a fresh Set per turn: use_skill uses it to avoid
     // re-returning the same skill's full instructions if the model calls it
     // more than once while working through one user message.
-    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set() } })
+    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
     let { transcript } = this.#sessions.append(userId, text, answer)

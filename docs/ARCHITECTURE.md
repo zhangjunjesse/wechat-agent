@@ -173,10 +173,13 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
   沙箱代码执行 run_code（worker_thread 隔离 + 仅注入字符串的 vm 沙箱，解决批量数据
   人工核对易错的问题）+ 文件下载 token（write_file 产出的文件可被用户真正拿到，
   不再是拿不到的空口承诺，见 ADR-0008）
+  iLink 真实文件发送 send_file（AES-128-ECB 加密 + CDN 上传，任意类型文件都能作为
+  微信文件消息直接发出去，不再只能给下载链接；协议按可信逆向工程参考实现，见
+  ADR-0009——真实线上效果待用户实测确认，见该 ADR"验证状态"）
 
 下一步（推荐）
   + create_skill 工具：用户通过对话创建自己的私有技能
-  + 调研 iLink 是否支持发文件/图片（当前未知，未验证）
+  + 真正生成二进制 .docx/.xlsx 文档（现在能发文件了，但还不能生成真 Office 格式）
   + 审计日志、费用统计
 
 远期（大厂级）
@@ -200,5 +203,6 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
 | 时间（东八区） | `services/time.mjs` | ✅ |
 | 微信聊天记录检索 | `services/wechat-log-store.mjs` + `tools/wechat-tools.mjs` + `skills/wechat-search/` | ✅ |
 | 沙箱代码执行 | `tools/code-tools.mjs` + `tools/code-worker.mjs`（worker_thread + vm） | ✅ |
+| iLink 文件发送 | `services/ilink-cdn.mjs` + `providers/ilink-provider.mjs#sendFile` + `tools/wechat-send-tools.mjs` | ✅（协议单测；线上实测待确认，见 ADR-0009） |
 | 文件下载链接 | `services/download-tokens.mjs` + `app.mjs` 的 `GET /files/:token` | ✅ |
 | 数据层 | SQLite（sessions/memories）+ JSON（bindings/profiles）+ 只读挂载 wechat-sync 的 sync_inbox.db | ✅ |

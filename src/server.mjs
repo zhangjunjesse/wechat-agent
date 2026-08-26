@@ -44,17 +44,18 @@ const wechatLogStore = wechatLogDbFile && fs.existsSync(wechatLogDbFile) ? new W
 if (wechatLogDbFile && !wechatLogStore) console.warn(`WECHAT_LOG_DB=${wechatLogDbFile} not found; wechat_* tools disabled`)
 
 // Download links (see ADR-0008): write_file / run_code write into a per-user
-// sandbox with no browse UI, and WeChat's bot channel has no file-send API —
-// an opaque, time-limited token turned into a real URL is the only way a user
-// can ever get a file the agent produces. Tokens live in memory (server.mjs
-// creates the ONE store both buildTools and createApp share) and expire.
+// sandbox with no browse UI — the universal fallback (works from web chat,
+// where there's no WeChat session to send a file through). On WeChat itself,
+// send_file (ADR-0009, wired below via `provider`) delivers a real file
+// attachment instead. Tokens live in memory (server.mjs creates the ONE
+// store both buildTools and createApp share) and expire.
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const downloadTokens = new DownloadTokenStore({ ttlMs: Number(process.env.DOWNLOAD_TOKEN_TTL_MS || 24 * 3600 * 1000) })
 process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')
 const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}files/${downloadTokens.issue(userId, relPath)}`
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink })
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-chat', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined

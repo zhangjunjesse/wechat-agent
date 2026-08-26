@@ -9,9 +9,11 @@ import { resolveUserPath } from '../services/user-sandbox.mjs'
  *
  * `issueDownloadLink(userId, relPath)` is optional: when provided, write_file
  * returns a real, fetchable URL for the file it just wrote (see
- * services/download-tokens.mjs + ADR-0008) instead of just a bare "写入成功"
- * message the user has no way to act on — WeChat has no file-send API and the
- * web UI has no browse view, so without this link the file is unreachable. */
+ * services/download-tokens.mjs + ADR-0008). This is the UNIVERSAL delivery
+ * path — works from the web chat (no WeChat session to send through) and as
+ * a fallback everywhere. On WeChat specifically, prefer the send_file tool
+ * (ADR-0009) for a real file attachment instead of a link the user has to tap
+ * out of the conversation. */
 export function fileTools({ root = process.env.USER_FILES_ROOT || 'data/user-files', issueDownloadLink } = {}) {
   const resolve = (userId, relPath) => resolveUserPath(root, userId, relPath)
 
@@ -29,7 +31,7 @@ export function fileTools({ root = process.env.USER_FILES_ROOT || 'data/user-fil
 
   const writeFile = tool({
     name: 'write_file',
-    description: '在用户自己目录下写入一个文本文件（用于整理资料、生成笔记/CSV/文档等）。返回的下载链接是用户唯一能拿到这个文件的方式——微信不支持机器人发文件，网页也没有单独的文件浏览页面，所以必须把返回的链接原样告诉用户，不要说"已经发给你"这类无法兑现的话。若内容是给 Excel 打开的 CSV 且含中文，请在 content 开头加 \\uFEFF（BOM）避免乱码。',
+    description: '在用户自己目录下写入一个文本文件（用于整理资料、生成笔记/CSV/文档等）。写完后如果当前对话是微信，优先用 send_file 把这个文件直接发给用户；如果是网页对话或 send_file 不可用，就把这里返回的下载链接原样发给用户。不要说"已经发给你"这类没有对应动作的话——要么真的调用了 send_file，要么给的是链接。若内容是给 Excel 打开的 CSV 且含中文，请在 content 开头加 \\uFEFF（BOM）避免乱码。',
     parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
     execute: async (input, ctx) => {
       const userId = ctx?.context?.userId
