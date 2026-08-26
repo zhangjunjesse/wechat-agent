@@ -5,9 +5,10 @@ import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
 import { PollingService } from './services/polling-service.mjs'
 import { VerificationService } from './services/verification-service.mjs'
+import { resolveUserPath } from './services/user-sandbox.mjs'
 import { renderPage } from './ui-page.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files' }) {
   const owned = []
   let polling
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
@@ -23,6 +24,22 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true })
       if (req.method === 'GET' && url.pathname === '/') return html(res, 200, renderPage())
       if (req.method === 'GET' && (url.pathname === '/assistant-qr.jpg' || url.pathname === '/wechat-agent/assistant-qr.jpg')) return binary(res, 200, 'image/jpeg', await fs.readFile(process.env.ASSISTANT_QR_FILE || path.resolve('assistant-qr.jpg')))
+      const fileMatch = url.pathname.match(/^(?:\/wechat-agent)?\/files\/([^/]+)$/)
+      if (req.method === 'GET' && fileMatch) {
+        // Files write_file/run_code produce live in a per-user sandbox with no
+        // browsing UI and no way to attach an auth header from a WeChat-tapped
+        // link (see ADR-0008) — the token itself, not a session, is the auth.
+        if (!downloadTokens) return json(res, 503, { error: 'downloads_not_configured' })
+        const entry = downloadTokens.resolve(fileMatch[1])
+        if (!entry) return json(res, 404, { error: 'not_found_or_expired' })
+        let full
+        try { full = resolveUserPath(userFilesRoot, entry.userId, entry.relPath) } catch { return json(res, 404, { error: 'not_found_or_expired' }) }
+        let data
+        try { data = await fs.readFile(full) } catch { return json(res, 404, { error: 'not_found_or_expired' }) }
+        const name = path.basename(entry.relPath)
+        res.writeHead(200, { 'content-type': guessContentType(name), 'content-length': data.length, 'content-disposition': `attachment; filename="${encodeURIComponent(name)}"`, 'cache-control': 'private, no-store' })
+        return res.end(data)
+      }
       if (req.method === 'GET' && url.pathname === '/api/qr') { const payload = url.searchParams.get('payload') || ''; if (!payload || payload.length > 2000) return json(res, 400, { error: 'invalid_qr_payload' }); const { toDataURL } = await import('qrcode'); return json(res, 200, { dataUrl: await toDataURL(payload, { width: 320, margin: 2 }) }) }
       if (req.method === 'POST' && url.pathname === '/api/bindings') { await readJson(req); const binding = await bindings.start(assertHeader(req, 'x-user-id')); bind(binding); return json(res, 201, binding) }
       if (req.method === 'POST' && url.pathname === '/api/profile-verifications') { const body = await readJson(req); if (!verification) return json(res, 503, { error: 'verification_not_configured' }); return json(res, 201, verification.create({ userId: assertHeader(req, 'x-user-id'), ilinkUserId: body.ilinkUserId || '' })) }
@@ -44,6 +61,8 @@ function readJson(req) { return new Promise((resolve, reject) => { let data = ''
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)) }
 function html(res, status, body) { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); res.end(body) }
 function binary(res, status, contentType, body) { res.writeHead(status, { 'content-type': contentType, 'content-length': body.length, 'cache-control': 'private, max-age=300' }); res.end(body) }
+const CONTENT_TYPES = { '.csv': 'text/csv; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.html': 'text/html; charset=utf-8', '.json': 'application/json; charset=utf-8' }
+function guessContentType(filename) { return CONTENT_TYPES[path.extname(filename).toLowerCase()] || 'application/octet-stream' }
 function page() { const basePath = process.env.PUBLIC_BASE_PATH || '/'; return `<!doctype html><meta charset="utf-8"><base href="${basePath}"><title>微信个人助手</title><style>body{font:16px system-ui;max-width:680px;margin:30px auto;padding:0 16px}input,button{font:16px;padding:9px;margin:4px 0}#qr{max-width:360px;display:block;margin-top:20px}#status{white-space:pre-wrap;color:#555}.verify{margin-top:22px;border-top:1px solid #ddd;padding-top:18px}.code{white-space:pre-wrap;background:#fff7ed;border:2px solid #f97316;padding:16px;font-size:24px;font-weight:700;color:#9a3412}.chat{border-top:1px solid #ddd;margin-top:22px;padding-top:18px}.log{min-height:100px;border:1px solid #ddd;padding:10px;margin-bottom:8px}</style><h1>微信个人助手</h1><p>先绑定 Bot，再验证微信昵称，验证通过后才能使用助手。</p><input id="user" placeholder="用户标识" value="test-user"><button id="start">获取 Bot 绑定二维码</button><div id="status"></div><img id="qr" alt="Bot 绑定二维码"><section id="verify" class="verify" style="display:none"><h2>第二步：验证微信身份</h2><p>请扫描二维码添加微信联系人 <b>助手</b>，然后向助手发送下方 6 位数字验证码。</p><img src="assistant-qr.jpg?v=2" alt="助手微信二维码" style="width:320px;background:#fff" onerror="this.style.display='none';document.getElementById('qrError').style.display='block'"><div id="qrError" style="display:none;color:#b42318">助手二维码暂时无法加载，请联系管理员。</div><p id="verifyHint" class="code">正在生成验证码…</p></section><section id="chat" class="chat" style="display:none"><h2>验证成功</h2><p>微信 Bot 已完成绑定和身份核验。请直接回到微信与 Bot 对话。</p></section><script>
 const $=id=>document.getElementById(id);let bindingTimer=null,verificationTimer=null,verificationId=null;
 async function checkVerification(user){if(!verificationId)return;const r=await fetch('api/profile-verifications/'+verificationId,{headers:{'x-user-id':user}});if(!r.ok)return;const x=await r.json();if(x.status==='verified'){$('verifyHint').textContent='已核验昵称：'+(x.profile.nickname||'未知')+'\\nwxid：'+x.profile.wxid;$('chat').style.display='block';clearInterval(verificationTimer)}}

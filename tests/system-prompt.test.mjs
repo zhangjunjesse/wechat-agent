@@ -1,13 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { SAFETY_RULES, buildBaseInstructions, buildDynamicSystem } from '../src/llm/system-prompt.mjs'
+import { SAFETY_RULES, TOOL_USAGE_RULES, buildBaseInstructions, buildDynamicSystem } from '../src/llm/system-prompt.mjs'
 
-test('base instructions carry safety rules, role behavior and skill catalog', () => {
+test('base instructions carry safety rules, tool-usage rules, role behavior and skill catalog', () => {
   const base = buildBaseInstructions({ skillCatalog: '可用技能：\n- demo: 演示' })
   assert.match(base, /安全规则/)
   assert.match(base, /不泄露其他用户的数据/)
   assert.match(base, /简洁但信息完整/)
   assert.match(base, /demo: 演示/)
+  assert.match(base, /工具使用规则/)
+  assert.match(base, /run_code/)
+  assert.match(base, /已经发给你/)
+})
+
+test('tool usage rules are a non-empty list of 2', () => {
+  assert.equal(TOOL_USAGE_RULES.length, 2)
 })
 
 test('dynamic system layers role name, identity, time, memory and summary in order', () => {

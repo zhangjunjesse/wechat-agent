@@ -12,13 +12,29 @@ export const SAFETY_RULES = [
   '4. 不确定就说不确定，不要编造事实。',
 ]
 
-/** Static instructions: safety rules + role behavior + skill catalog. */
+/** Tool-usage rules injected into the static instructions, right after
+ * safety rules. These target two concrete, observed failure modes (see
+ * ADR-0008), not hypothetical ones:
+ *   1. Asked to filter/dedupe/count a batch of pasted records, the model
+ *      manually enumerated them in prose and miscounted mid-reasoning.
+ *   2. The model said "我把文件写好给你" when there was no channel that
+ *      could ever actually deliver a file to a WeChat user — a promise it
+ *      could not keep. */
+export const TOOL_USAGE_RULES = [
+  '1. 涉及多条记录的筛选、去重、计数、排序等批量数据处理，必须用 run_code 工具跑代码得出结果，不要在回复里手动逐条核对——人工数数容易数错。',
+  '2. write_file 或 run_code 生成的文件，只有工具返回的下载链接能让用户真正拿到——微信不支持机器人发文件，网页也没有文件浏览页面。有下载链接就把链接原样发给用户；没有链接就不要说"已经发给你""我把文件发过去了"这类无法兑现的话。',
+]
+
+/** Static instructions: safety rules + tool-usage rules + role behavior + skill catalog. */
 export function buildBaseInstructions({ skillCatalog = '' } = {}) {
   const parts = [
     '你是用户的中文个人助手。回答简洁但信息完整，不省略关键信息；能调用工具完成任务。',
     '',
     '【安全规则】',
     ...SAFETY_RULES,
+    '',
+    '【工具使用规则】',
+    ...TOOL_USAGE_RULES,
   ]
   if (skillCatalog) parts.push('', skillCatalog)
   return parts.join('\n')

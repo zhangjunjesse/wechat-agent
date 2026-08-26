@@ -28,3 +28,22 @@ test('file tools are sandboxed to the user directory', async () => {
     try { fs.rmSync(root, { recursive: true, force: true }) } catch (e) {}
   }
 })
+
+test('write_file returns a real download link when issueDownloadLink is wired, and stays silent without it', async () => {
+  const root = path.join(os.tmpdir(), `ft-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const ctx = { context: { userId: 'u1' } }
+  try {
+    const calls = []
+    const withLink = fileTools({ root, issueDownloadLink: (userId, relPath) => { calls.push([userId, relPath]); return `https://example.com/files/tok-${relPath}` } })
+    const withLinkMsg = await call(withLink.writeFile, { path: 'out/a.csv', content: 'x' }, ctx)
+    assert.match(withLinkMsg, /下载链接.*https:\/\/example\.com\/files\/tok-out\/a\.csv/)
+    assert.deepEqual(calls, [['u1', 'out/a.csv']])
+
+    const withoutLink = fileTools({ root })
+    const noLinkMsg = await call(withoutLink.writeFile, { path: 'out/b.csv', content: 'y' }, ctx)
+    assert.equal(noLinkMsg, '已写入 out/b.csv')
+    assert.doesNotMatch(noLinkMsg, /下载链接/)
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }) } catch (e) {}
+  }
+})
