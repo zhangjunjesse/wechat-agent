@@ -8,7 +8,7 @@ export function binaryFileTools({ root = process.env.USER_FILES_ROOT || 'data/us
   const createXlsx = tool({
     name: 'create_xlsx',
     description: '把二维表格数据生成真正的二进制 .xlsx Excel 文件。不要把 CSV 冒充 xlsx；生成后在微信对话中必须调用 send_file 发送。',
-    parameters: { type: 'object', properties: { path: { type: 'string' }, rows: { type: 'array', items: { type: 'array', items: { type: ['string','number','boolean','null'] } } } }, required: ['path', 'rows'] },
+    parameters: { type: 'object', properties: { path: { type: 'string' }, rows: { type: 'array', items: { type: 'array', items: {} } } }, required: ['path', 'rows'] },
     execute: async (input, ctx) => writeBinary(root, issueDownloadLink, ctx, input.path, makeXlsx(input.rows), 'xlsx'),
   })
   const createDocx = tool({
