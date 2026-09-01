@@ -5,6 +5,7 @@ import { todoTools } from './todo-tools.mjs'
 import { miscTools } from './misc-tools.mjs'
 import { wechatTools } from './wechat-tools.mjs'
 import { wechatSendTools } from './wechat-send-tools.mjs'
+import { binaryFileTools } from './binary-file-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -28,9 +29,11 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   const todos = todoTools({ memoryManager })
   const misc = miscTools({ skillRegistry })
   const send = wechatSendTools({ provider, root })
+  const binary = binaryFileTools({ root, issueDownloadLink })
   const tools = [
     files.readFile, files.writeFile, files.listFiles,
     code.runCode,
+    binary.createXlsx, binary.createDocx, binary.createPdf,
     web.getWeather, web.webFetch,
     todos.addTodo, todos.listTodo,
     misc.getCurrentTime, misc.useSkill, misc.askUser,

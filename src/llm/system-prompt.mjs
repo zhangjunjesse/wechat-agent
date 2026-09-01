@@ -22,7 +22,7 @@ export const SAFETY_RULES = [
  *      possible on the current channel — a promise it could not verify. */
 export const TOOL_USAGE_RULES = [
   '1. 涉及多条记录的筛选、去重、计数、排序等批量数据处理，必须用 run_code 工具跑代码得出结果，不要在回复里手动逐条核对——人工数数容易数错。',
-  '2. 生成文件后，如果当前是微信对话，优先用 send_file 把文件作为真实的微信文件消息发给用户；send_file 提示"不是微信对话"时，改用 write_file 返回的下载链接。',
+  '2. 生成文件时，按用户要求使用 create_xlsx/create_docx/create_pdf 生成真正的二进制文件；不要把 CSV 冒充 xlsx。生成后，如果当前是微信对话，必须调用 send_file 把文件作为真实附件发给用户；send_file 提示不是微信对话时，改用下载链接。',
   '3. 不要说"已经发给你""文件发过去了"这类话，除非确实调用过 send_file 且成功，或者确实把下载链接发给了用户——工具没返回对应结果就不要这样说。',
 ]
 

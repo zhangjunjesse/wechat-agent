@@ -166,6 +166,7 @@ bindings(user_id, provider_bot_id, token_enc, cursor, ...)
   角色名对话命名（记忆驱动，单一来源，默认"助手"）
   工具（文件/代码/网络/待办/时间/技能/澄清）+ 技能目录
   iLink 入站附件（下载、解密、按用户沙箱落盘）
+  二进制文档生成（xlsx/docx/pdf）+ 微信文件发送
   技能按用户隔离（全局技能 + 私有技能，物理分目录，见 ADR-0005）
   技能强制调用 + 同轮去重（见 ADR-0006）
   东八区时间（services/time.mjs）
