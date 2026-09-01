@@ -27,16 +27,20 @@ export function assertBotProfile(profile) {
 
 export function assertInboundEvent(event) {
   if (!event || typeof event !== 'object') throw new TypeError('event is required')
-  for (const key of ['providerBotId', 'providerMessageId', 'providerUserId', 'text']) {
+  for (const key of ['providerBotId', 'providerMessageId', 'providerUserId']) {
     if (typeof event[key] !== 'string' || !event[key].trim()) {
       throw new TypeError(`event.${key} is required`)
     }
   }
+  if (typeof event.text !== 'string') throw new TypeError('event.text is required')
+  const attachments = Array.isArray(event.attachments) ? event.attachments : []
+  if (!event.text.trim() && !attachments.length) throw new TypeError('event.text or event.attachments is required')
   return {
     providerBotId: event.providerBotId,
     providerMessageId: event.providerMessageId,
     providerUserId: event.providerUserId,
     text: event.text,
+    attachments,
     contextToken: typeof event.contextToken === 'string' ? event.contextToken : '',
     occurredAt: Number.isFinite(event.occurredAt) ? event.occurredAt : Date.now(),
   }

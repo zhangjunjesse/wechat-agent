@@ -47,7 +47,7 @@ export class MessageRouter {
     // the agent itself. Web chat calls agent.respond() with no channel at
     // all, so tools that need it degrade gracefully (see wechat-send-tools.mjs).
     const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
-    const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text, profile, channel })
+    const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text || '用户发送了附件。', profile, channel, attachments: normalized.attachments || [] })
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
     const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })

@@ -14,7 +14,8 @@ import { WechatLogStore } from './services/wechat-log-store.mjs'
 import { DownloadTokenStore } from './services/download-tokens.mjs'
 import { buildTools } from './tools/index.mjs'
 
-const provider = new ILinkProvider()
+const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
+const provider = new ILinkProvider({ userFilesRoot })
 const store = new BindingStore({ file: process.env.BINDINGS_FILE || 'data/bindings.json' })
 const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./services/remote-wechat-verifier.mjs')).RemoteWechatVerifier({ baseUrl: process.env.WECHAT_SYNC_BASE_URL || 'https://datadefender.cn', accessKey: process.env.WECHAT_SYNC_ACCESS_KEY }) : null
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
@@ -49,7 +50,6 @@ if (wechatLogDbFile && !wechatLogStore) console.warn(`WECHAT_LOG_DB=${wechatLogD
 // send_file (ADR-0009, wired below via `provider`) delivers a real file
 // attachment instead. Tokens live in memory (server.mjs creates the ONE
 // store both buildTools and createApp share) and expire.
-const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const downloadTokens = new DownloadTokenStore({ ttlMs: Number(process.env.DOWNLOAD_TOKEN_TTL_MS || 24 * 3600 * 1000) })
 process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')

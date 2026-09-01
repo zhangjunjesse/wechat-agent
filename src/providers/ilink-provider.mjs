@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { aesEcbPaddedSize, uploadBufferToCdn } from '../services/ilink-cdn.mjs'
+import { downloadInboundFile } from '../services/ilink-media.mjs'
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
 // MessageItemType.FILE / UploadMediaType.FILE from the iLink bot protocol
@@ -13,13 +14,32 @@ export class ILinkProvider {
   #fetch
   #now
   #baseUrl
+  #userFilesRoot
+  #cdnBaseUrl
   #sessions = new Map()
 
-  constructor({ fetchImpl = globalThis.fetch, now = () => Date.now(), baseUrl = DEFAULT_BASE_URL } = {}) {
+  constructor({ fetchImpl = globalThis.fetch, now = () => Date.now(), baseUrl = DEFAULT_BASE_URL, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', cdnBaseUrl = 'https://novac2c.cdn.weixin.qq.com/c2c' } = {}) {
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required')
     this.#fetch = fetchImpl
     this.#now = now
     this.#baseUrl = baseUrl.replace(/\/$/, '')
+    this.#userFilesRoot = userFilesRoot
+    this.#cdnBaseUrl = cdnBaseUrl
+  }
+
+  async #normalizeInboundMessage(session, message) {
+    const items = message.item_list || []
+    const text = items.filter((i) => i.type === 1).map((i) => i.text_item?.text || '').join('')
+    const attachments = []
+    for (const item of items) {
+      if (![2, 3, 4, 5].includes(item.type)) continue
+      try {
+        attachments.push(await downloadInboundFile({ fetchImpl: this.#fetch, item, userId: message.from_user_id, root: this.#userFilesRoot, cdnBaseUrl: this.#cdnBaseUrl, messageId: String(message.message_id || message.client_id || '') }))
+      } catch (error) {
+        attachments.push({ type: item.type === 4 ? 'file' : item.type === 2 ? 'image' : item.type === 5 ? 'video' : 'voice', name: item.file_item?.file_name || '未成功下载的附件', error: error.message })
+      }
+    }
+    return { providerBotId: session.botId, providerMessageId: String(message.message_id || message.client_id || ''), providerUserId: message.from_user_id, text, attachments, occurredAt: this.#now(), contextToken: message.context_token || '' }
   }
 
   async createBindingQr({ userId }) {
@@ -63,11 +83,13 @@ export class ILinkProvider {
     if (!session) throw new Error('bound session not available')
     const response = await this.#post(session, 'ilink/bot/getupdates', { get_updates_buf: session.cursor || '' }, 35_000)
     if (response.get_updates_buf) session.cursor = response.get_updates_buf
-    return { status: 'ok', events: (response.msgs || []).filter((m) => m.message_type === 1).flatMap((m) => {
-      const text = (m.item_list || []).find((i) => i.type === 1)?.text_item?.text || ''
-      if (!text || !m.from_user_id) return []
-      return [{ providerBotId: session.botId, providerMessageId: String(m.message_id || m.client_id || ''), providerUserId: m.from_user_id, text, occurredAt: this.#now(), contextToken: m.context_token || '' }]
-    }) }
+    const events = []
+    for (const message of (response.msgs || []).filter((m) => m.message_type === 1)) {
+      if (!message.from_user_id) continue
+      const event = await this.#normalizeInboundMessage(session, message)
+      if (event.text || event.attachments.length) events.push(event)
+    }
+    return { status: 'ok', events }
   }
 
   async sendText({ providerBotId, toProviderUserId, text, contextToken }) {

@@ -37,9 +37,11 @@ export class SessionStore {
   }
 
   /** Append one user+assistant turn to the full transcript. Never drops. */
-  append(userId, userText, assistantText) {
+  append(userId, userText, assistantText, attachments = []) {
     const cur = this.get(userId)
-    const transcript = [...cur.transcript, { role: 'user', content: userText }, { role: 'assistant', content: assistantText }]
+    const userMessage = { role: 'user', content: userText }
+    if (attachments.length) userMessage.attachments = structuredClone(attachments)
+    const transcript = [...cur.transcript, userMessage, { role: 'assistant', content: assistantText }]
     this.#write(userId, cur.summary, transcript)
     return { transcript: [...transcript], summary: cur.summary, tokenEstimate: estimateMessagesTokens(transcript) }
   }

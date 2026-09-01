@@ -74,6 +74,39 @@ test('sendFile uploads the buffer AES-encrypted to the CDN, then sends a FILE it
   assert.equal(Buffer.from(item.file_item.media.aes_key, 'base64').length, 16)
 })
 
+test('pollEvents downloads and decrypts inbound FILE items into the user sandbox', async () => {
+  const fs = await import('node:fs/promises')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inbound-'))
+  try {
+    const key = crypto.randomBytes(16)
+    const plain = Buffer.from('name,age\n张三,30\n', 'utf8')
+    const cipher = crypto.createCipheriv('aes-128-ecb', key, null)
+    const encrypted = Buffer.concat([cipher.update(plain), cipher.final()])
+    const encodedKey = Buffer.from(key.toString('hex')).toString('base64')
+    const provider = new ILinkProvider({
+      userFilesRoot: root,
+      fetchImpl: async (url) => {
+        if (String(url).includes('getupdates')) {
+          return { ok: true, json: async () => ({ msgs: [{ message_type: 1, message_id: 99, from_user_id: 'wx-user', context_token: 'ctx', item_list: [{ type: 4, file_item: { file_name: '名单.csv', media: { encrypt_query_param: 'download-param', aes_key: encodedKey } } }] }] }) }
+        }
+        if (String(url).includes('/download?')) return { ok: true, arrayBuffer: async () => encrypted.buffer.slice(encrypted.byteOffset, encrypted.byteOffset + encrypted.byteLength) }
+        throw new Error(`unexpected fetch: ${url}`)
+      },
+    })
+    await provider.restoreSession({ bindingRef: 'b', userId: 'tenant', botId: 'bot-in', token: 'tok', baseUrl: 'https://region', profile: { providerUserId: 'wx-owner' }, cursor: '' })
+    const events = await provider.pollEvents({ providerBotId: 'bot-in' })
+    assert.equal(events.events.length, 1)
+    assert.equal(events.events[0].text, '')
+    assert.match(events.events[0].attachments[0].name, /名单\.csv$/)
+    const saved = await fs.readFile(path.join(root, 'wx-user', events.events[0].attachments[0].path), 'utf8')
+    assert.equal(saved, plain.toString('utf8'))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('sendFile rejects without a bound session or a contextToken', async () => {
   const provider = new ILinkProvider({ fetchImpl: async () => { throw new Error('should not fetch') } })
   await assert.rejects(() => provider.sendFile({ providerBotId: 'unknown', toProviderUserId: 'x', contextToken: 'ctx', fileName: 'a.csv', buffer: Buffer.from('x') }), /bound session not available/)

@@ -43,10 +43,13 @@ export class AgentsSdkAgent {
     return (resp.choices?.[0]?.message?.content || '').trim()
   }
 
-  async respond({ userId, text, profile, channel = null }) {
+  async respond({ userId, text, profile, channel = null, attachments = [] }) {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     const session = this.#sessions.get(userId)
     const memories = this.#memory.recall(userId)
+    const attachmentText = attachments.length
+      ? `\n\n本轮已收到附件：\n${attachments.map((a) => `- ${a.name || '未命名'}（路径：${a.path || '不可用'}，大小：${a.size || '未知'}字节）`).join('\n')}\n附件未被实际工具读取前，不要声称已经看过内容。`
+      : ''
     const context = buildDynamicSystem({
       nickname: profile?.nickname || '',
       assistantName: this.#memory.assistantName(userId),
@@ -60,10 +63,10 @@ export class AgentsSdkAgent {
     // loadedSkills is a fresh Set per turn: use_skill uses it to avoid
     // re-returning the same skill's full instructions if the model calls it
     // more than once while working through one user message.
-    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel } })
+    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
-    let { transcript } = this.#sessions.append(userId, text, answer)
+    let { transcript } = this.#sessions.append(userId, text, answer, attachments)
     if (this.#compactor.needsFold(transcript)) {
       const folded = await this.#compactor.fold(transcript, session.summary)
       this.#sessions.fold(userId, folded.summary, folded.keptTranscript)
