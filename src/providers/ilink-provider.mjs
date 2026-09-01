@@ -156,7 +156,12 @@ export class ILinkProvider {
     try {
       const response = await this.#fetch(`${session.baseUrl}/${path}`, { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json', AuthorizationType: 'ilink_bot_token', Authorization: `Bearer ${session.token}`, 'iLink-App-Id': APP_ID, 'iLink-App-ClientVersion': CLIENT_VERSION, 'X-WECHAT-UIN': Buffer.from(String(Math.floor(Math.random() * 2 ** 32))).toString('base64') }, body })
       if (!response.ok) throw new Error(`iLink POST failed: ${response.status}`)
-      return response.json()
+      const result = await response.json()
+      if ((Number.isFinite(result?.errcode) && result.errcode !== 0) || (Number.isFinite(result?.ret) && result.ret !== 0)) {
+        const detail = result.errmsg || result.error || `code ${result.errcode ?? result.ret}`
+        throw new Error(`iLink ${path} failed: ${detail} (${result.errcode ?? result.ret})`)
+      }
+      return result
     } finally { clearTimeout(timer) }
   }
 }
