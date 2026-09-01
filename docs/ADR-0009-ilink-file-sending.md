@@ -1,6 +1,6 @@
 # ADR-0009: iLink 真实文件发送（send_file）
 
-- 状态：Accepted（协议字段已按可信参考源实现并单测验证；**真实线上发送效果待用户在微信里实测确认**，见下方"验证状态"）
+- 状态：Accepted（协议字段已按可信参考源实现并单测验证；**真实线上发送效果待用户在微信里实测确认；getuploadurl 响应兼容 upload_full_url**，见下方"验证状态"）
 - 类型：Architecture / Feature
 - 日期：2026-08-26
 
@@ -30,10 +30,10 @@ ADR-0008 里写"iLink 是否支持发文件/图片：未调研、未验证，仍
 ```
 1. 本地生成随机 16 字节 AES key + 16 字节 hex filekey
 2. 计算明文 MD5、明文大小、密文大小（PKCS7 填充公式）
-3. POST ilink/bot/getuploadurl（跟 sendmessage 同一套鉴权头）→ 拿 upload_param
-4. AES-128-ECB 加密文件 → POST 到 CDN host 的 /upload，带 upload_param+filekey
+3. POST ilink/bot/getuploadurl（跟 sendmessage 同一套鉴权头）→ 拿 `upload_full_url`（当前协议优先）或兼容旧的 `upload_param`
+4. AES-128-ECB 加密文件 → POST 到完整上传 URL（或旧 CDN `/upload` + upload_param+filekey）
    → 响应头 x-encrypted-param 就是接收端要用的下载凭证
-5. POST ilink/bot/sendmessage，item_list: [{type:4, file_item:{media:{encrypt_query_param, aes_key(base64), encrypt_type:1}, file_name, len}}]
+5. POST ilink/bot/sendmessage，item_list: [{type:4, file_item:{media:{encrypt_query_param, aes_key(base64(hexKey)), encrypt_type:1}, file_name, len}}]
 ```
 
 ## 决策

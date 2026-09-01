@@ -71,7 +71,8 @@ test('sendFile uploads the buffer AES-encrypted to the CDN, then sends a FILE it
   assert.equal(item.file_item.len, String(buffer.length))
   assert.equal(item.file_item.media.encrypt_query_param, 'dl-xyz')
   assert.equal(item.file_item.media.encrypt_type, 1)
-  assert.equal(Buffer.from(item.file_item.media.aes_key, 'base64').length, 16)
+  assert.equal(Buffer.from(item.file_item.media.aes_key, 'base64').toString('ascii').length, 32)
+  assert.match(Buffer.from(item.file_item.media.aes_key, 'base64').toString('ascii'), /^[0-9a-f]{32}$/)
 })
 
 test('pollEvents downloads and decrypts inbound FILE items into the user sandbox', async () => {
@@ -105,6 +106,21 @@ test('pollEvents downloads and decrypts inbound FILE items into the user sandbox
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+test('sendFile accepts the current upload_full_url response shape', async () => {
+  const calls = []
+  const provider = await boundProvider(async (url, options) => {
+    calls.push({ url: String(url), options })
+    if (String(url).includes('get_bot_qrcode')) return { ok: true, json: async () => ({ qrcode: 'q1', qrcode_img_content: 'https://qr/q1' }) }
+    if (String(url).includes('get_qrcode_status')) return { ok: true, json: async () => ({ status: 'confirmed', ilink_bot_id: 'bot-full', ilink_user_id: 'wx-owner', bot_token: 'secret', baseurl: 'https://region' }) }
+    if (String(url).includes('getuploadurl')) return { ok: true, json: async () => ({ upload_full_url: 'https://upload.example/cdn/signed' }) }
+    if (String(url).includes('upload.example')) return { status: 200, headers: { get: (k) => k === 'x-encrypted-param' ? 'dl-full' : null } }
+    if (String(url).includes('sendmessage')) return { ok: true, json: async () => ({ ret: 0 }) }
+    throw new Error(`unexpected fetch: ${url}`)
+  })
+  await provider.sendFile({ providerBotId: 'bot-full', toProviderUserId: 'wx-peer', contextToken: 'ctx', fileName: 'report.xlsx', buffer: Buffer.from('binary') })
+  assert.ok(calls.some((c) => c.url === 'https://upload.example/cdn/signed'))
 })
 
 test('sendFile rejects without a bound session or a contextToken', async () => {

@@ -35,9 +35,11 @@ export function buildCdnUploadUrl({ cdnBaseUrl = CDN_BASE_URL, uploadParam, file
  * `x-encrypted-param` response header) to embed as `CDNMedia.encrypt_query_param`
  * in the eventual sendmessage call. Retries transient (5xx/network) failures;
  * a 4xx is treated as non-retryable (bad request shape, retrying won't help). */
-export async function uploadBufferToCdn({ fetchImpl = globalThis.fetch, buf, uploadParam, filekey, aeskey, cdnBaseUrl = CDN_BASE_URL, maxRetries = 3 }) {
+export async function uploadBufferToCdn({ fetchImpl = globalThis.fetch, buf, uploadParam, uploadFullUrl = '', filekey, aeskey, cdnBaseUrl = CDN_BASE_URL, maxRetries = 3 }) {
   const ciphertext = encryptAesEcb(buf, aeskey)
-  const url = buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey })
+  const fullUrl = String(uploadFullUrl || '').trim()
+  if (!fullUrl && !uploadParam) throw new Error('CDN upload URL missing: upload_full_url/upload_param')
+  const url = fullUrl || buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey })
   let lastError
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {

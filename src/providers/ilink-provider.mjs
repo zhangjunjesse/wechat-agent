@@ -124,9 +124,9 @@ export class ILinkProvider {
       filekey, media_type: MEDIA_TYPE_FILE, to_user_id: toProviderUserId,
       rawsize, rawfilemd5, filesize, no_need_thumb: true, aeskey: aeskey.toString('hex'),
     })
-    if (!uploadUrlResp.upload_param) throw new Error(`iLink getuploadurl returned no upload_param: ${JSON.stringify(uploadUrlResp)}`)
+    if (!uploadUrlResp.upload_param && !uploadUrlResp.upload_full_url) throw new Error(`iLink getuploadurl returned no upload URL: ${JSON.stringify(uploadUrlResp)}`)
 
-    const { downloadParam } = await uploadBufferToCdn({ fetchImpl: this.#fetch, buf: buffer, uploadParam: uploadUrlResp.upload_param, filekey, aeskey })
+    const { downloadParam } = await uploadBufferToCdn({ fetchImpl: this.#fetch, buf: buffer, uploadParam: uploadUrlResp.upload_param, uploadFullUrl: uploadUrlResp.upload_full_url, filekey, aeskey })
 
     const clientId = `ilink-${this.#now()}-${crypto.randomBytes(4).toString('hex')}`
     const result = await this.#post(session, 'ilink/bot/sendmessage', {
@@ -135,7 +135,7 @@ export class ILinkProvider {
         message_type: 2, message_state: 2, context_token: contextToken,
         item_list: [{
           type: ITEM_TYPE_FILE,
-          file_item: { media: { encrypt_query_param: downloadParam, aes_key: aeskey.toString('base64'), encrypt_type: 1 }, file_name: fileName, len: String(rawsize) },
+          file_item: { media: { encrypt_query_param: downloadParam, aes_key: Buffer.from(aeskey.toString('hex')).toString('base64'), encrypt_type: 1 }, file_name: fileName, len: String(rawsize) },
         }],
       },
     })
