@@ -55,7 +55,13 @@ export class MessageRouter {
     const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text || '用户发送了附件。', profile, channel, attachments: normalized.attachments || [] })
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
-    const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })
+    // Long tool-heavy turns (image gen, research) can take a minute+; the
+    // inbound contextToken may expire by then. Prefer the freshest cached
+    // token (refreshed by any newer inbound message) and fall back to the
+    // inbound one. (See DESIGN-timed-tasks.md for the cache.)
+    const fresh = this.#contextTokens?.get(normalized.providerUserId)
+    const sendToken = fresh?.contextToken || normalized.contextToken
+    const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: sendToken })
     return { accepted: true, duplicate: false, providerMessageId: sent.providerMessageId, text: reply.text }
   }
 }
