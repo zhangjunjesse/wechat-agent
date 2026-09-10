@@ -12,6 +12,9 @@ import { MemoryExtractor } from './llm/memory-extractor.mjs'
 import { SkillRegistry } from './skills/skill-registry.mjs'
 import { WechatLogStore } from './services/wechat-log-store.mjs'
 import { DownloadTokenStore } from './services/download-tokens.mjs'
+import { TaskStore } from './services/task-store.mjs'
+import { ContextTokenCache } from './services/context-token-cache.mjs'
+import { TaskScheduler } from './services/task-scheduler.mjs'
 import { buildTools } from './tools/index.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
@@ -21,6 +24,16 @@ const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./servi
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
 const sessionStore = new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
 const memoryStore = new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' })
+const taskStore = new TaskStore({ file: process.env.TASKS_FILE || 'data/tasks.db' })
+const contextTokens = new ContextTokenCache({ file: process.env.CONTEXT_TOKENS_FILE || 'data/context-tokens.json' })
+// Load public (global) tasks from the deploy config; subscribers persist in the DB.
+const globalTasksFile = process.env.GLOBAL_TASKS_FILE || path.resolve(__dirname, '..', 'deploy', 'global-tasks.json')
+if (fs.existsSync(globalTasksFile)) {
+  try {
+    const loaded = taskStore.loadGlobalTasks(JSON.parse(fs.readFileSync(globalTasksFile, 'utf8')))
+    if (loaded.length) console.log(`global tasks loaded: ${loaded.map((t) => t.name).join(', ')}`)
+  } catch (e) { console.warn(`failed to load global tasks from ${globalTasksFile}: ${e.message}`) }
+}
 // Resolve skills relative to the source tree (repo root / container /app),
 // independent of process CWD, so the declarative skills/ dir is always found.
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -55,13 +68,19 @@ process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')
 const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}files/${downloadTokens.issue(userId, relPath)}`
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider })
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
 
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot })
+// Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
+const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens }) : null
+scheduler?.start()
+
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
 console.log(`wechat-agent listening on http://${host}:${port}`)
+process.on('SIGTERM', () => { scheduler?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGINT', () => { scheduler?.stop(); contextTokens.flush(); process.exit(0) })

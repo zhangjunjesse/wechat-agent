@@ -41,6 +41,17 @@
   经 `src/services/image-api.mjs` Node 封装异步任务流程；服务器网络需用国内域名
   `TOAPIS_BASE_URL=https://toapis.cn`，直连 toapis.com 超时；key=`TOAPIS_API_KEY`）。
 
+## 定时任务（ADR-0014，私有 + 公共订阅）
+
+- 模型：私有任务（用户 create_task/delete_task，owner 独享）+ 公共任务
+  （`deploy/global-tasks.json` 预置，`subscribe_task`/`unsubscribe_task` 订阅）。
+- 调度：极简表达式 `daily@HH:MM` / `weekly@D@HH:MM` / `hourly@MM`（北京时间，
+  零依赖）；`TaskScheduler` 30s tick，anchor 模型到期判定（创建/上次执行起算，
+  不补跑历史周期）。
+- 投递：到点 agent 执行指令（复用全部工具/技能）→ iLink 推微信；依赖
+  `ContextTokenCache`（入站消息更新，落盘重启恢复）。无 token/未验证用户跳过。
+- 存储：`data/tasks.db`（SQLite）。
+
 ## 消息发送能力（ADR-0008/0009/0012）
 
 - 文本：`sendText`（item.type=1）。

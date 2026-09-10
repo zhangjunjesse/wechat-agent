@@ -9,6 +9,7 @@ import { binaryFileTools } from './binary-file-tools.mjs'
 import { gzhTools } from './gzh-tools.mjs'
 import { manageSkillTools } from './manage-skill-tools.mjs'
 import { imageTools } from './image-tools.mjs'
+import { taskTools } from './task-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -30,7 +31,7 @@ import { imageTools } from './image-tools.mjs'
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -54,6 +55,10 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   if (process.env.ADMIN_SKILLS === '1') {
     const manage = manageSkillTools({ skillRegistry })
     tools.push(manage.manageSkill)
+  }
+  if (taskStore) {
+    const tasks = taskTools({ taskStore })
+    tools.push(tasks.createTask, tasks.listMyTasks, tasks.deleteTask, tasks.listGlobalTasks, tasks.subscribeTask, tasks.unsubscribeTask)
   }
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore })

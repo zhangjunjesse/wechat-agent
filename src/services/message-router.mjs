@@ -8,18 +8,23 @@ export class MessageRouter {
   #allowPeerUsers
   #contextProvider
   #requireVerified
+  #contextTokens
 
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
     this.#allowPeerUsers = allowPeerUsers
     this.#contextProvider = contextProvider
     this.#requireVerified = requireVerified
+    this.#contextTokens = contextTokens
   }
 
   async handleInbound(event) {
     const normalized = assertInboundEvent(event)
+    // Keep the freshest contextToken per iLink user — the scheduler's
+    // proactive push depends on it (see DESIGN-timed-tasks.md).
+    this.#contextTokens?.update(normalized.providerUserId, { contextToken: normalized.contextToken, providerBotId: normalized.providerBotId })
     const binding = this.#bindings.find((b) => b.providerBotId === normalized.providerBotId)
     if (!binding) return { accepted: false, reason: 'unknown_bot' }
     if (!this.#allowPeerUsers && binding.profile?.providerUserId !== normalized.providerUserId) {
