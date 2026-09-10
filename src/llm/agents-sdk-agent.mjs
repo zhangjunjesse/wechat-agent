@@ -7,6 +7,7 @@ import { MemoryExtractor } from './memory-extractor.mjs'
 import { MemoryManager } from './memory-manager.mjs'
 import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
 import { buildUseSkillTool } from '../tools/misc-tools.mjs'
+import { wrapClientForDeepSeek } from './deepseek-thinking-client.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -16,11 +17,18 @@ export class AgentsSdkAgent {
   #skillRegistry
   #staticTools
   #makeAgent
+  #resetThinking
 
   constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillRegistry = null }) {
-    const client = new OpenAI({ apiKey, baseURL: baseUrl })
-    this.#llm = client
-    const sdkModel = new OpenAIChatCompletionsModel(client, model)
+    // DeepSeek thinking-mode compat: the model runs on a wrapped client that
+    // round-trips `reasoning_content` through multi-turn tool calls (see
+    // deepseek-thinking-client.mjs); memory/summarize calls keep the raw
+    // client so they never inherit the agent loop's reasoning cache.
+    const rawClient = new OpenAI({ apiKey, baseURL: baseUrl })
+    const { client: modelClient, reset: resetThinking } = wrapClientForDeepSeek(rawClient)
+    this.#resetThinking = resetThinking
+    this.#llm = rawClient
+    const sdkModel = new OpenAIChatCompletionsModel(modelClient, model)
     this.#skillRegistry = skillRegistry
     // Agent is a stateless definition; build one per call so tools can carry
     // per-user sandboxing through run context (ctx.context.userId), and so the
@@ -61,6 +69,9 @@ export class AgentsSdkAgent {
       nowMs: Date.now(),
     })
     const enabledGlobal = this.#skillRegistry?.resolveEnabled(profile?.enabledSkills)
+    // Fresh reasoning cache per run: multi-turn tool calls inside this run
+    // round-trip reasoning_content; nothing leaks into the next run.
+    this.#resetThinking?.()
     // Progressive skill loading (ADR-0013): the system prompt only points at
     // use_skill; the tool description carries this user's catalog (name +
     // one-liner), and full instructions are loaded on demand. Rebuilt per
