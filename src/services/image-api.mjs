@@ -17,7 +17,7 @@ import path from 'node:path'
  *
  * key 来源：TOAPIS_API_KEY 环境变量 > ~/.toapis_key。 */
 
-export const IMAGE_API_BASE_URL = 'https://toapis.com'
+export const IMAGE_API_BASE_URL = process.env.TOAPIS_BASE_URL || 'https://toapis.com'
 export const IMAGE_MODEL = 'gpt-image-2'
 
 export const IMAGE_SIZES = ['1:1', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5', '16:9', '9:16', '2:1', '1:2', '21:9', '9:21']
