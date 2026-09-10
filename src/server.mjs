@@ -24,9 +24,14 @@ const verifier = process.env.WECHAT_SYNC_ACCESS_KEY ? new (await import('./servi
 const profileStore = new (await import('./services/profile-store.mjs')).ProfileStore({ file: process.env.PROFILES_FILE || 'data/profiles.json' })
 const sessionStore = new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
 const memoryStore = new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' })
+// Resolve skills relative to the source tree (repo root / container /app),
+// independent of process CWD, so the declarative skills/ dir is always found.
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || path.resolve(__dirname, '..', 'skills') })
+
+// Timed tasks (ADR-0014): store + contextToken cache + public task catalog.
 const taskStore = new TaskStore({ file: process.env.TASKS_FILE || 'data/tasks.db' })
 const contextTokens = new ContextTokenCache({ file: process.env.CONTEXT_TOKENS_FILE || 'data/context-tokens.json' })
-// Load public (global) tasks from the deploy config; subscribers persist in the DB.
 const globalTasksFile = process.env.GLOBAL_TASKS_FILE || path.resolve(__dirname, '..', 'deploy', 'global-tasks.json')
 if (fs.existsSync(globalTasksFile)) {
   try {
@@ -34,10 +39,6 @@ if (fs.existsSync(globalTasksFile)) {
     if (loaded.length) console.log(`global tasks loaded: ${loaded.map((t) => t.name).join(', ')}`)
   } catch (e) { console.warn(`failed to load global tasks from ${globalTasksFile}: ${e.message}`) }
 }
-// Resolve skills relative to the source tree (repo root / container /app),
-// independent of process CWD, so the declarative skills/ dir is always found.
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || path.resolve(__dirname, '..', 'skills') })
 
 // MemoryManager needs an extractor that talks to the same LLM the agent uses.
 const llm = new (await import('openai')).default({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' })
