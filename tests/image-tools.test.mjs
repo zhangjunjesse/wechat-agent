@@ -60,7 +60,7 @@ test('image_generate explains the missing API key', async () => {
   try {
     const { imageGenerate } = imageTools({ root, getKey: () => null })
     const out = await call(imageGenerate, { prompt: '猫' }, ilinkCtx)
-    assert.match(out, /TOAPIS_API_KEY/)
+    assert.match(out, /未配置图片服务 API Key/)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
