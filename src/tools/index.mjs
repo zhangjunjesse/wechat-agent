@@ -8,6 +8,7 @@ import { wechatSendTools } from './wechat-send-tools.mjs'
 import { binaryFileTools } from './binary-file-tools.mjs'
 import { gzhTools } from './gzh-tools.mjs'
 import { manageSkillTools } from './manage-skill-tools.mjs'
+import { imageTools } from './image-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -38,6 +39,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   const send = wechatSendTools({ provider, root })
   const binary = binaryFileTools({ root, issueDownloadLink })
   const gzh = gzhTools()
+  const image = imageTools({ root })
   const tools = [
     files.readFile, files.writeFile, files.listFiles,
     code.runCode,
@@ -47,6 +49,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     misc.getCurrentTime, misc.askUser,
     send.sendFile,
     gzh.gzhSearch, gzh.gzhContent,
+    image.imageGenerate,
   ]
   if (process.env.ADMIN_SKILLS === '1') {
     const manage = manageSkillTools({ skillRegistry })
