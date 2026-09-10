@@ -64,8 +64,9 @@ export class TaskScheduler {
         // Due iff the next trigger after the anchor has already arrived.
         if (next <= now) {
           try {
-            await this.#runTask(task)
-            this.#taskStore.markRun(task.id, now)
+            const results = await this.#runTask(task)
+            const errors = results.filter((r) => r?.error).map((r) => `${r.userId}: ${r.error}`)
+            this.#taskStore.markRun(task.id, now, errors.join('; '))
           } catch (error) {
             this.#taskStore.markRun(task.id, now, error.message || String(error))
             this.#onError?.(error, task)
@@ -77,12 +78,14 @@ export class TaskScheduler {
     }
   }
 
-  /** Execute a task for every target user. */
+  /** Execute a task for every target user; returns per-user results. */
   async #runTask(task) {
     const targets = task.scope === 'user' ? [task.ownerUserId] : (task.subscribers || [])
+    const results = []
     for (const userId of targets) {
-      await this.#runForUser(task, userId)
+      results.push(await this.#runForUser(task, userId))
     }
+    return results
   }
 
   async #runForUser(task, userId) {

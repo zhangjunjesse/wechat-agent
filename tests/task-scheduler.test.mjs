@@ -12,12 +12,16 @@ import { ContextTokenCache } from '../src/services/context-token-cache.mjs'
 const NOW = Date.UTC(2026, 8, 10, 0, 0, 30)
 const CREATED = NOW - 60_000
 
-function setup({ tasks = [], subscribers = {} } = {}) {
+function setup({ tasks = [], subscribers = {}, failSend = false } = {}) {
   const file = path.join(os.tmpdir(), `sch-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
   const store = new TaskStore({ file })
   const agent = { respond: async (args) => ({ text: `输出(${args.text.slice(0, 20)}…)` }) }
   const sent = []
-  const provider = { sendText: async (args) => { sent.push(args); return { providerMessageId: 'm1' } } }
+  const provider = {
+    sendText: failSend
+      ? async () => { throw new Error('iLink 401 过期') }
+      : async (args) => { sent.push(args); return { providerMessageId: 'm1' } },
+  }
   const profiles = new Map()
   const profileStore = { get: async (id) => profiles.get(id) || null }
   const tokens = new ContextTokenCache({ file: file + '.ctx.json', flushDelayMs: 60000 })
@@ -99,6 +103,23 @@ test('a subscriber without a verified profile is skipped without breaking others
     await scheduler.sweep()
     assert.equal(sent.length, 1)
     assert.equal(sent[0].toProviderUserId, 'u1')
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('send failures are aggregated into lastError', async () => {
+  const { file, store, scheduler, profiles } = setup({
+    tasks: [{ name: '早报', schedule: 'daily@08:00', instruction: 'x', ownerUserId: 'u1' }],
+    subscribers: { u1: 'tok-u1' },
+    failSend: true,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx1', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    const t = store.getTask('user-u1-早报')
+    assert.ok(t.lastRunAt > 0)
+    assert.match(t.lastError, /iLink 401 过期/)
   } finally {
     store?.close?.(); fs.rmSync(file, { force: true })
   }
