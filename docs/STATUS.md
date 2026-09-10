@@ -59,6 +59,11 @@
   必须 `docker rm + docker run`，`docker restart` 不会重读 env-file）。
   模型 `deepseek-flash`（API 实测：可用模型仅 `deepseek-flash` / `deepseek-v4-pro`），
   `REDFOX_API_KEY` 已配置，gzh 搜索/抓正文线上实测连通。
+- **DeepSeek thinking 兼容**（关键）：deepseek-flash 默认思考模式，带 tools 的多轮
+  请求必须回传 `reasoning_content`（否则 400）。`src/llm/deepseek-thinking-client.mjs`
+  包装 OpenAI client 按 assistant 消息顺序缓存/回填；`agents-sdk-agent` 每次 run
+  前 reset，记忆/摘要用原始 client 不受影响。实测"搜苹果发布会"多轮工具调用 + 9 篇
+  正文抓取全链路正常（54s）。
 - **iLink 真实发送效果需要用户在微信里跟 bot 实测**（协议是逆向的，单测只证明
   字段拼对了）：① 视频是否以原生可播放消息送达 ② 图片是否原生图片消息 ③ 100MB
   上限是否接近真实限制（超大文件可能被服务器拒绝）。
