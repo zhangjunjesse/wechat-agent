@@ -20,7 +20,7 @@ function completionWithReasoning(reasoning) {
 }
 
 test('caches reasoning_content from responses and injects it back in order', async () => {
-  const { client, calls } = fakeClient({ respond: (body) => completionWithReasoning(`think-${calls.length + 1}`) })
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning(`think-${calls.length}`) })
   const { client: wrapped, reset } = wrapClientForDeepSeek(client)
   reset()
 
