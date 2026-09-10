@@ -36,7 +36,10 @@
 - **发布路径**：L1 仓库内置（现状）→ L2 技能仓库 git 同步（`SKILLS_REPO`，未实现）
   → L3 运行时 manage_skill（已实现）。
 - 已接入技能：`wechat-gzh-research`（公众号调研 SOP，编排 `gzh_search`/`gzh_content`
-  两个 Node 工具直连 RedFoxHub API，`REDFOX_API_KEY` 或 `~/.qoder/apis/redfox.json`）。
+  两个 Node 工具直连 RedFoxHub API，`REDFOX_API_KEY` 或 `~/.qoder/apis/redfox.json`）、
+  `image-studio`（图片处理 SOP：文生图/图生图/编辑/局部重绘，`image_generate` 工具，
+  经 `src/services/image-api.mjs` Node 封装异步任务流程；服务器网络需用国内域名
+  `TOAPIS_BASE_URL=https://toapis.cn`，直连 toapis.com 超时；key=`TOAPIS_API_KEY`）。
 
 ## 消息发送能力（ADR-0008/0009/0012）
 
