@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { ILinkProvider } from '../src/providers/ilink-provider.mjs'
+import { aesEcbPaddedSize } from '../src/services/ilink-cdn.mjs'
 
 test('iLink adapter maps QR lifecycle, credentials, polling and send payload', async () => {
   const calls = []
@@ -132,4 +133,73 @@ test('sendFile rejects without a bound session or a contextToken', async () => {
     return { ok: true, json: async () => ({ status: 'confirmed', ilink_bot_id: 'bot-2', ilink_user_id: 'wx-owner', bot_token: 'secret', baseurl: 'https://region' }) }
   })
   await assert.rejects(() => bound.sendFile({ providerBotId: 'bot-2', toProviderUserId: 'x', contextToken: '', fileName: 'a.csv', buffer: Buffer.from('x') }), /contextToken is required/)
+})
+
+// Shared mock: QR lifecycle + getuploadurl + CDN + sendmessage, recording calls.
+function mediaFetch(calls, { downloadParam = 'dl-xyz', uploadFullUrl = '' } = {}) {
+  return async (url, options) => {
+    calls.push({ url: String(url), options })
+    if (String(url).includes('get_bot_qrcode')) return { ok: true, json: async () => ({ qrcode: 'q1', qrcode_img_content: 'https://qr/q1' }) }
+    if (String(url).includes('get_qrcode_status')) return { ok: true, json: async () => ({ status: 'confirmed', ilink_bot_id: 'bot-1', ilink_user_id: 'wx-owner', bot_token: 'secret', baseurl: 'https://region' }) }
+    if (String(url).includes('getuploadurl')) return { ok: true, json: async () => (uploadFullUrl ? { upload_full_url: uploadFullUrl } : { upload_param: 'up-xyz' }) }
+    if (String(url).includes('novac2c.cdn.weixin.qq.com') || (uploadFullUrl && String(url).startsWith(uploadFullUrl))) return { status: 200, headers: { get: (k) => (k === 'x-encrypted-param' ? downloadParam : null) } }
+    if (String(url).includes('sendmessage')) return { ok: true, json: async () => ({ ret: 0 }) }
+    throw new Error(`unexpected fetch: ${url}`)
+  }
+}
+
+function lastSendItem(calls) {
+  const sendCall = calls.find((c) => c.url.includes('sendmessage'))
+  return JSON.parse(sendCall.options.body).msg.item_list[0]
+}
+
+test('sendVideo uploads with media_type=VIDEO and sends a VIDEO item whose video_size is the ciphertext size', async () => {
+  const calls = []
+  const provider = await boundProvider(mediaFetch(calls))
+  const buffer = Buffer.from('fake mp4 payload', 'utf8')
+  await provider.sendVideo({ providerBotId: 'bot-1', toProviderUserId: 'wx-peer', contextToken: 'ctx', fileName: 'clip.mp4', buffer })
+
+  const uploadUrlBody = JSON.parse(calls.find((c) => c.url.includes('getuploadurl')).options.body)
+  assert.equal(uploadUrlBody.media_type, 2) // VIDEO
+  assert.equal(uploadUrlBody.rawsize, buffer.length)
+  assert.equal(uploadUrlBody.no_need_thumb, true)
+  assert.equal(uploadUrlBody.aeskey.length, 32)
+
+  const item = lastSendItem(calls)
+  assert.equal(item.type, 5) // VIDEO
+  assert.equal(item.video_item.video_size, aesEcbPaddedSize(buffer.length))
+  assert.equal(item.video_item.media.encrypt_query_param, 'dl-xyz')
+  assert.equal(item.video_item.media.encrypt_type, 1)
+  assert.match(Buffer.from(item.video_item.media.aes_key, 'base64').toString('ascii'), /^[0-9a-f]{32}$/)
+  assert.equal(item.video_item.file_name, undefined)
+  assert.equal(item.file_item, undefined)
+})
+
+test('sendImage uploads with media_type=IMAGE and sends an IMAGE item whose mid_size is the ciphertext size', async () => {
+  const calls = []
+  const provider = await boundProvider(mediaFetch(calls))
+  const buffer = Buffer.from('fake png payload', 'utf8')
+  await provider.sendImage({ providerBotId: 'bot-1', toProviderUserId: 'wx-peer', contextToken: 'ctx', fileName: 'photo.png', buffer })
+
+  const uploadUrlBody = JSON.parse(calls.find((c) => c.url.includes('getuploadurl')).options.body)
+  assert.equal(uploadUrlBody.media_type, 1) // IMAGE
+  assert.equal(uploadUrlBody.rawsize, buffer.length)
+  assert.equal(uploadUrlBody.no_need_thumb, true)
+
+  const item = lastSendItem(calls)
+  assert.equal(item.type, 2) // IMAGE
+  assert.equal(item.image_item.mid_size, aesEcbPaddedSize(buffer.length))
+  assert.equal(item.image_item.media.encrypt_query_param, 'dl-xyz')
+  assert.equal(item.image_item.media.encrypt_type, 1)
+  assert.match(Buffer.from(item.image_item.media.aes_key, 'base64').toString('ascii'), /^[0-9a-f]{32}$/)
+  assert.equal(item.file_item, undefined)
+})
+
+test('sendVideo/sendImage reuse the same CDN upload pipeline (upload_full_url accepted)', async () => {
+  const calls = []
+  const provider = await boundProvider(mediaFetch(calls, { uploadFullUrl: 'https://upload.example/cdn/signed-v' }))
+  const buffer = Buffer.from('bytes', 'utf8')
+  await provider.sendVideo({ providerBotId: 'bot-1', toProviderUserId: 'wx-peer', contextToken: 'ctx', fileName: 'v.mp4', buffer })
+  assert.ok(calls.some((c) => c.url === 'https://upload.example/cdn/signed-v'))
+  assert.equal(lastSendItem(calls).type, 5)
 })

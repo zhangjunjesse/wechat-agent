@@ -50,8 +50,9 @@ ADR-0008 里写"iLink 是否支持发文件/图片：未调研、未验证，仍
 contextToken, fileName, buffer})` 复用现有的私有 `#post`/`#find`（跟 `sendText` 同一套
 鉴权和会话查找逻辑），只是多了 `getuploadurl` 和 CDN 上传两步。当前只实现了**通用文件
 附件**（`media_type=FILE`、`item.type=FILE`）——WeChat 的"文件"类型不关心内容，docx/
-xlsx/pdf/csv/zip 等任意类型都能发；没有做 `image_item`/`video_item` 的专门内联预览路径
-（那需要缩略图等额外字段，收益不确定，这次不做，需要时再加，管道本身已经通用）。
+xlsx/pdf/csv/zip 等任意类型都能发；**图片/视频的专门消息通道（`image_item`/
+`video_item`）已由 ADR-0012 实现**，当时推测"需要缩略图等额外字段"不成立——
+`no_need_thumb=true` 即可。
 
 ### 3. 新增 `send_file` 工具，按"当前对话渠道"决定能不能用
 
@@ -111,4 +112,5 @@ toProviderUserId, contextToken}` 传进 `agent.respond()`，`agents-sdk-agent.mj
 - 真实发送效果需要用户在微信里实测确认（见上）。
 - 仍然不能生成真正的二进制 `.docx`/`.xlsx` 文档（ADR-0005 就记录的缺口）——这次解决的
   是"文件能不能发出去"，不是"能不能生成真正的 Office 二进制格式"，两者是分开的问题。
-- 没有做图片/视频的内联预览发送。
+- 图片/视频的内联消息通道（原生图片消息、可播放的视频消息）已由 **ADR-0012** 实现；
+  ADR-0009 只负责通用文件附件通道。
