@@ -54,12 +54,14 @@
 
 ## 未验证 / 待办（诚实边界）
 
+- **已部署**：2026-09-10 部署到 `datadefender.cn/wechat-agent`（tgz 打包 →
+  `/opt/wechat-agent/app` 挂载运行，`docker run --env-file server.env`；重建容器
+  必须 `docker rm + docker run`，`docker restart` 不会重读 env-file）。
+  模型 `deepseek-flash`（API 实测：可用模型仅 `deepseek-flash` / `deepseek-v4-pro`），
+  `REDFOX_API_KEY` 已配置，gzh 搜索/抓正文线上实测连通。
 - **iLink 真实发送效果需要用户在微信里跟 bot 实测**（协议是逆向的，单测只证明
   字段拼对了）：① 视频是否以原生可播放消息送达 ② 图片是否原生图片消息 ③ 100MB
   上限是否接近真实限制（超大文件可能被服务器拒绝）。
-- **gzh 真实搜索/抓正文**需要配置 REDFOX_API_KEY 后实测（本机
-  `~/.qoder/apis/redfox.json` 有 key；mock 测试只证明协议字段与错误分支）。
 - L2 技能仓库同步、技能脚本执行器抽象、用户私有技能上传接口为后续工作。
 - bindings 仍是 JSON 文件存储（`data/bindings.json`），未做加密 + 未迁移真实数据库。
-- 本地改完需重新构建部署到 `datadefender.cn/wechat-agent`（以服务器为准）。
 - 语音消息（VOICE 通道）未实现专门发送，音频走文件附件（用户未要求）。
