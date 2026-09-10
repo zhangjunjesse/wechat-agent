@@ -5,11 +5,12 @@
 
 ## 项目
 
-- 仓库：`C:\Users\Administrator\Desktop\wechat-agent`（git 干净）
+- 仓库：`C:\Users\Administrator\Desktop\wechat-agent`（git 干净，已 push GitHub
+  zhangjunjesse/wechat-agent）
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **112/112 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **131/131 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -19,8 +20,23 @@
 - Agent：`src/llm/agents-sdk-agent.mjs` + `src/services/message-router.mjs`
   （把 `channel`/`userId` 透传给工具）；多租户（web + iLink 统一 tenant key）。
 - 能力：记忆（MEMORY-SPEC.md）、会话压缩、沙箱 run_code、文件读写、聊天记录搜索
-  skill、skill 系统（全局+私有+强制调用）、二进制文档生成、文件/图片/视频发送。
-- 决策记录：`docs/ADR-0001` ~ `ADR-0012`，新增决策前先读 spec-loop 约定。
+  skill、渐进式动态技能系统、二进制文档生成、文件/图片/视频发送、公众号调研。
+- 决策记录：`docs/ADR-0001` ~ `ADR-0013`，新增决策前先读 spec-loop 约定。
+
+## 技能系统（ADR-0005/0006/0013，渐进式动态管理）
+
+- 技能 = `skills/<name>/SKILL.md`（frontmatter：name/description/version/author/
+  updated_at + 指令正文）；全局（`SKILLS_DIR`，随仓库分发）+ 用户私有
+  （`data/user-skills/<userId>/`，物理隔离），per-user enable（profile.enabledSkills）。
+- **渐进式加载**：system prompt 只有一行引导；`use_skill` 工具描述每轮动态携带当前
+  用户技能目录（名称+一句话+版本，私有标记，cap 25 条，`name=list` 查完整目录）；
+  全文按需加载，本轮去重。
+- **动态管理**：`manage_skill` 工具（`ADMIN_SKILLS=1` 时注册）热增删改，校验 name/
+  frontmatter/大小；放文件即生效无需重启。
+- **发布路径**：L1 仓库内置（现状）→ L2 技能仓库 git 同步（`SKILLS_REPO`，未实现）
+  → L3 运行时 manage_skill（已实现）。
+- 已接入技能：`wechat-gzh-research`（公众号调研 SOP，编排 `gzh_search`/`gzh_content`
+  两个 Node 工具直连 RedFoxHub API，`REDFOX_API_KEY` 或 `~/.qoder/apis/redfox.json`）。
 
 ## 消息发送能力（ADR-0008/0009/0012）
 
@@ -41,7 +57,9 @@
 - **iLink 真实发送效果需要用户在微信里跟 bot 实测**（协议是逆向的，单测只证明
   字段拼对了）：① 视频是否以原生可播放消息送达 ② 图片是否原生图片消息 ③ 100MB
   上限是否接近真实限制（超大文件可能被服务器拒绝）。
+- **gzh 真实搜索/抓正文**需要配置 REDFOX_API_KEY 后实测（本机
+  `~/.qoder/apis/redfox.json` 有 key；mock 测试只证明协议字段与错误分支）。
+- L2 技能仓库同步、技能脚本执行器抽象、用户私有技能上传接口为后续工作。
 - bindings 仍是 JSON 文件存储（`data/bindings.json`），未做加密 + 未迁移真实数据库。
-- Agent 是否已部署/更新到 `datadefender.cn/wechat-agent` 以服务器为准；本地改完
-  需重新构建部署。
+- 本地改完需重新构建部署到 `datadefender.cn/wechat-agent`（以服务器为准）。
 - 语音消息（VOICE 通道）未实现专门发送，音频走文件附件（用户未要求）。

@@ -6,6 +6,8 @@ import { miscTools } from './misc-tools.mjs'
 import { wechatTools } from './wechat-tools.mjs'
 import { wechatSendTools } from './wechat-send-tools.mjs'
 import { binaryFileTools } from './binary-file-tools.mjs'
+import { gzhTools } from './gzh-tools.mjs'
+import { manageSkillTools } from './manage-skill-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -21,7 +23,12 @@ import { binaryFileTools } from './binary-file-tools.mjs'
  *
  * `provider` (optional) is the ILinkProvider instance, wired into `send_file`
  * (ADR-0009) so it can push a real WeChat file attachment when the current
- * turn's run-context `channel` says we're on a WeChat conversation. */
+ * turn's run-context `channel` says we're on a WeChat conversation.
+ *
+ * `use_skill` is NOT assembled here: it carries the per-user skill catalog in
+ * its description and is built per turn by AgentsSdkAgent (ADR-0013).
+ * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
+ * management, see ADR-0013). */
 export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
@@ -30,15 +37,21 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   const misc = miscTools({ skillRegistry })
   const send = wechatSendTools({ provider, root })
   const binary = binaryFileTools({ root, issueDownloadLink })
+  const gzh = gzhTools()
   const tools = [
     files.readFile, files.writeFile, files.listFiles,
     code.runCode,
     binary.createXlsx, binary.createDocx, binary.createPdf,
     web.getWeather, web.webFetch,
     todos.addTodo, todos.listTodo,
-    misc.getCurrentTime, misc.useSkill, misc.askUser,
+    misc.getCurrentTime, misc.askUser,
     send.sendFile,
+    gzh.gzhSearch, gzh.gzhContent,
   ]
+  if (process.env.ADMIN_SKILLS === '1') {
+    const manage = manageSkillTools({ skillRegistry })
+    tools.push(manage.manageSkill)
+  }
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore })
     tools.push(wechat.wechatListChats, wechat.wechatSearchChat, wechat.wechatSearchMentions, wechat.wechatSearchMyMessages)

@@ -2,16 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SAFETY_RULES, TOOL_USAGE_RULES, buildBaseInstructions, buildDynamicSystem } from '../src/llm/system-prompt.mjs'
 
-test('base instructions carry safety rules, tool-usage rules, role behavior and skill catalog', () => {
-  const base = buildBaseInstructions({ skillCatalog: '可用技能：\n- demo: 演示' })
+test('base instructions carry safety rules, tool-usage rules, role behavior and a one-line skill pointer', () => {
+  const base = buildBaseInstructions()
   assert.match(base, /安全规则/)
   assert.match(base, /不泄露其他用户的数据/)
   assert.match(base, /简洁但信息完整/)
-  assert.match(base, /demo: 演示/)
   assert.match(base, /工具使用规则/)
   assert.match(base, /run_code/)
   assert.match(base, /send_file/)
   assert.match(base, /已经发给你/)
+  // The skill catalog itself lives in the use_skill tool description (ADR-0013):
+  // the prompt only carries a one-line pointer, never per-skill content.
+  assert.match(base, /可用技能的名称与简介见 use_skill 工具描述/)
+  assert.doesNotMatch(base, /^可用技能（/m)
 })
 
 test('tool usage rules are a non-empty list of 3', () => {

@@ -26,8 +26,14 @@ export const TOOL_USAGE_RULES = [
   '3. 不要说"已经发给你""文件发过去了"这类话，除非确实调用过 send_file 且成功，或者确实把下载链接发给了用户——工具没返回对应结果就不要这样说。',
 ]
 
-/** Static instructions: safety rules + tool-usage rules + role behavior + skill catalog. */
-export function buildBaseInstructions({ skillCatalog = '' } = {}) {
+/** Static instructions: safety rules + tool-usage rules + role behavior.
+ *
+ * The skill catalog deliberately lives in the use_skill tool description, not
+ * here (ADR-0013): the prompt only carries a one-line pointer, and the model
+ * sees the current user's skill list (name + one-liner) in the tool
+ * description, loading full instructions on demand via use_skill. This keeps
+ * per-turn fixed cost small as the skill set grows. */
+export function buildBaseInstructions() {
   const parts = [
     '你是用户的中文个人助手。回答简洁但信息完整，不省略关键信息；能调用工具完成任务。',
     '',
@@ -36,8 +42,9 @@ export function buildBaseInstructions({ skillCatalog = '' } = {}) {
     '',
     '【工具使用规则】',
     ...TOOL_USAGE_RULES,
+    '',
+    '【技能】可用技能的名称与简介见 use_skill 工具描述；用户需求命中某项时，必须先调用 use_skill 加载该技能完整指令再执行，不得凭名字猜测，也不得只提到技能名却不实际调用。',
   ]
-  if (skillCatalog) parts.push('', skillCatalog)
   return parts.join('\n')
 }
 

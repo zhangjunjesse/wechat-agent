@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { miscTools } from '../src/tools/misc-tools.mjs'
+import { miscTools, buildUseSkillTool } from '../src/tools/misc-tools.mjs'
 import { SkillRegistry } from '../src/skills/skill-registry.mjs'
 
 function call(toolFn, input, ctx) {
@@ -80,5 +80,26 @@ test('use_skill works without a loadedSkills context (defensive default)', async
     const { useSkill } = miscTools({ skillRegistry: registry })
     const out = await call(useSkill, { name: 'demo' }, { context: { userId: 'u1' } })
     assert.match(out, /做演示的步骤/)
+  } finally { try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {} }
+})
+
+test('buildUseSkillTool bakes the per-user catalog into the tool description (ADR-0013)', () => {
+  const { base, registry } = makeRegistry()
+  try {
+    const useSkill = buildUseSkillTool({ skillRegistry: registry, catalog: registry.catalogForTool('u1') })
+    assert.match(useSkill.description, /可用技能（1）/)
+    assert.match(useSkill.description, /- demo: 演示技能/)
+    assert.match(useSkill.description, /必须先调用本工具/)
+  } finally { try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {} }
+})
+
+test('buildUseSkillTool returns the full catalog for name=list without marking it loaded', async () => {
+  const { base, registry } = makeRegistry()
+  try {
+    const useSkill = buildUseSkillTool({ skillRegistry: registry, catalog: registry.catalogForTool('u1') })
+    const loaded = new Set()
+    const out = await call(useSkill, { name: 'list' }, { context: { userId: 'u1', loadedSkills: loaded } })
+    assert.match(out, /可用技能（1）/)
+    assert.equal(loaded.size, 0) // listing is not loading
   } finally { try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {} }
 })

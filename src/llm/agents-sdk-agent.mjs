@@ -6,6 +6,7 @@ import { SessionCompactor, buildSummarizePrompt } from './session-compactor.mjs'
 import { MemoryExtractor } from './memory-extractor.mjs'
 import { MemoryManager } from './memory-manager.mjs'
 import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
+import { buildUseSkillTool } from '../tools/misc-tools.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -13,6 +14,7 @@ export class AgentsSdkAgent {
   #llm
   #memory
   #skillRegistry
+  #staticTools
   #makeAgent
 
   constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillRegistry = null }) {
@@ -22,10 +24,11 @@ export class AgentsSdkAgent {
     this.#skillRegistry = skillRegistry
     // Agent is a stateless definition; build one per call so tools can carry
     // per-user sandboxing through run context (ctx.context.userId), and so the
-    // skill catalog in instructions can vary per user (per-user skill isolation).
-    // Safety rules + role behavior are fixed; the skill catalog is computed
-    // per-turn in respond() from that user's enabled + private skills.
-    this.#makeAgent = (instructions) => new Agent({ name: '微信个人助手', model: sdkModel, instructions, tools })
+    // use_skill catalog in its tool description can vary per user (ADR-0013:
+    // per-user skill isolation + progressive loading). Safety rules + role
+    // behavior are fixed; the skill catalog is computed per-turn in respond().
+    this.#staticTools = tools
+    this.#makeAgent = (instructions, tools) => new Agent({ name: '微信个人助手', model: sdkModel, instructions, tools })
     this.#sessions = sessionStore || new SessionStore({ file: process.env.SESSIONS_FILE || 'data/sessions.db' })
     this.#compactor = new SessionCompactor({ summarize: async (turns) => this.#summarize(turns), tokenBudget, threshold, keepTurns })
     this.#memory = new MemoryManager({ store: memoryStore || new MemoryStore({ file: process.env.MEMORIES_FILE || 'data/memories.db' }), extractor: new MemoryExtractor({ complete: (messages, opts) => this.#complete(messages, opts) }) })
@@ -58,12 +61,19 @@ export class AgentsSdkAgent {
       nowMs: Date.now(),
     })
     const enabledGlobal = this.#skillRegistry?.resolveEnabled(profile?.enabledSkills)
-    const skillCatalog = this.#skillRegistry?.catalogText(userId, enabledGlobal) || ''
-    const instructions = buildBaseInstructions({ skillCatalog })
+    // Progressive skill loading (ADR-0013): the system prompt only points at
+    // use_skill; the tool description carries this user's catalog (name +
+    // one-liner), and full instructions are loaded on demand. Rebuilt per
+    // turn so the catalog reflects current skills and this user's enablement.
+    const useSkillTool = this.#skillRegistry
+      ? buildUseSkillTool({ skillRegistry: this.#skillRegistry, catalog: this.#skillRegistry.catalogForTool(userId, enabledGlobal) })
+      : null
+    const tools = useSkillTool ? [...this.#staticTools, useSkillTool] : this.#staticTools
+    const instructions = buildBaseInstructions()
     // loadedSkills is a fresh Set per turn: use_skill uses it to avoid
     // re-returning the same skill's full instructions if the model calls it
     // more than once while working through one user message.
-    const result = await run(this.#makeAgent(instructions), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments } })
+    const result = await run(this.#makeAgent(instructions, tools), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments } })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
     let { transcript } = this.#sessions.append(userId, text, answer, attachments)

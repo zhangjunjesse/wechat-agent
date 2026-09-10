@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { SkillRegistry } from '../src/skills/skill-registry.mjs'
+import { SkillRegistry, validateSkillContent, parseSkillText } from '../src/skills/skill-registry.mjs'
 
 function writeSkill(dir, name, description, body) {
   fs.mkdirSync(path.join(dir, name), { recursive: true })
@@ -109,6 +109,80 @@ test('a private skill takes precedence over a same-named global skill for its ow
     assert.equal(reg.get('userA', 'demo').private, true)
     // another (unrelated) user still gets the global version
     assert.match(reg.get('userB', 'demo').instructions, /global body/)
+  } finally {
+    try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {}
+  }
+})
+
+test('frontmatter version/author/updated_at are parsed and surfaced', () => {
+  const { base, dir, userSkillsRoot } = makeDirs()
+  const name = 'vskill'
+  fs.mkdirSync(path.join(dir, name), { recursive: true })
+  fs.writeFileSync(path.join(dir, name, 'SKILL.md'), '---\nname: vskill\ndescription: 带版本\nversion: 2.1.0\nauthor: alice\nupdated_at: 2026-09-01\n---\nbody')
+  try {
+    const reg = new SkillRegistry({ dir, userSkillsRoot })
+    const s = reg.get(undefined, name)
+    assert.equal(s.version, '2.1.0')
+    assert.equal(s.author, 'alice')
+    assert.equal(s.updatedAt, '2026-09-01')
+    assert.match(reg.catalogForTool(), /vskill v2\.1\.0/)
+  } finally {
+    try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {}
+  }
+})
+
+test('catalogForTool lists name + one-liner, marks private skills, and caps with an overflow hint', () => {
+  const { base, dir, userSkillsRoot } = makeDirs()
+  for (let i = 0; i < 30; i++) writeSkill(dir, `s${i}`, `技能 ${i} 说明`, `body ${i}`)
+  writeSkill(path.join(userSkillsRoot, 'userA'), 'mine', '我的私有', 'mine body')
+  try {
+    const reg = new SkillRegistry({ dir, userSkillsRoot })
+    const cat = reg.catalogForTool('userA')
+    assert.match(cat, /可用技能（31）/)
+    assert.match(cat, /- mine（私有）/)
+    assert.match(cat, /- s0: 技能 0 说明/)
+    assert.match(cat, /另外 6 个/)
+    assert.match(cat, /name=list/)
+    // full catalog via cap 0
+    const full = reg.catalogForTool('userA', undefined, 0)
+    assert.match(full, /- s29: 技能 29 说明/)
+  } finally {
+    try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {}
+  }
+})
+
+test('validateSkillContent rejects bad names, missing frontmatter and oversized content', () => {
+  assert.equal(validateSkillContent({ name: 'bad name!', content: '---\nname: bad name!\ndescription: x\n---\nb' }).ok, false)
+  assert.equal(validateSkillContent({ name: '../evil', content: '---\nname: ../evil\ndescription: x\n---\nb' }).ok, false)
+  assert.equal(validateSkillContent({ name: 'ok', content: 'no frontmatter' }).ok, false)
+  assert.equal(validateSkillContent({ name: 'ok', content: '---\ndescription: 缺 name\n---\nb' }).ok, false)
+  assert.equal(validateSkillContent({ name: 'ok', content: '---\nname: other\ndescription: x\n---\nb' }).ok, false) // name mismatch
+  assert.equal(validateSkillContent({ name: 'ok', content: '---\nname: ok\ndescription: x\n---\nb' }).ok, true)
+  assert.equal(validateSkillContent({ name: 'ok', content: '---\nname: ok\n---\nb' }).ok, false) // missing description
+  const big = 'x'.repeat(64 * 1024 + 1)
+  assert.equal(validateSkillContent({ name: 'ok', content: `---\nname: ok\ndescription: x\n---\n${big}` }).ok, false)
+})
+
+test('parseSkillText splits frontmatter meta from body', () => {
+  const { meta, instructions } = parseSkillText('---\nname: a\ndescription: b\n---\nbody text')
+  assert.deepEqual(meta, { name: 'a', description: 'b' })
+  assert.equal(instructions, 'body text')
+})
+
+test('addSkill writes a hot-effective global skill; removeSkill deletes it', () => {
+  const { base, dir, userSkillsRoot } = makeDirs()
+  try {
+    const reg = new SkillRegistry({ dir, userSkillsRoot })
+    const content = '---\nname: newskill\ndescription: 新增技能\nversion: 0.1.0\n---\n新技能步骤'
+    const r = reg.addSkill({ name: 'newskill', content })
+    assert.equal(r.ok, true)
+    assert.match(reg.get(undefined, 'newskill').instructions, /新技能步骤/)
+    assert.equal(reg.get(undefined, 'newskill').version, '0.1.0')
+    assert.equal(reg.addSkill({ name: 'bad name', content }).ok, false) // rejected, nothing written
+    const rm = reg.removeSkill({ name: 'newskill' })
+    assert.equal(rm.ok, true)
+    assert.equal(reg.get(undefined, 'newskill'), null)
+    assert.equal(reg.removeSkill({ name: '../escape' }).ok, false)
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {}
   }

@@ -1,6 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+// Catalog cap for the use_skill tool description (ADR-0013): the description
+// lists name+one-liner only, keeping per-turn context small; beyond the cap
+// the model is told to call use_skill with name=list for the full catalog.
+const SKILL_CATALOG_CAP = 25
+const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+const MAX_SKILL_BYTES = 64 * 1024
+
 /** Lightweight skill system, modeled on Claude Code / workbuddy skills but
  * scoped to declarative directories, with per-user isolation.
  *
@@ -76,6 +83,40 @@ export class SkillRegistry {
     if (!list.length) return ''
     return '可用技能（下面只是名字+一句话描述；一旦用户需求匹配某一项，必须先调用 use_skill 工具加载该技能完整指令再执行，不得凭猜测直接执行，也不得只是提到技能名却不实际调用）：\n' + list.map((s) => `- ${s.name}: ${s.description}`).join('\n')
   }
+
+  /** Compact catalog for the use_skill tool description (ADR-0013): name +
+   * one-liner + version, private marker, capped at SKILL_CATALOG_CAP entries.
+   * Full instructions stay out of the prompt until use_skill loads them. */
+  catalogForTool(userId, enabledGlobal = this.#defaultEnabled, cap = SKILL_CATALOG_CAP) {
+    const list = [...this.list(userId, enabledGlobal)].sort((a, b) => Number(b.private) - Number(a.private) || String(a.name).localeCompare(String(b.name)))
+    if (!list.length) return '当前没有可用技能。'
+    const shown = cap > 0 ? list.slice(0, cap) : list
+    const lines = shown.map((s) => `- ${s.name}${s.private ? '（私有）' : ''}${s.version ? ` v${s.version}` : ''}: ${s.description}`)
+    if (list.length > shown.length) lines.push(`- …以及另外 ${list.length - shown.length} 个（调用 use_skill 传 name=list 查看完整目录）`)
+    return `可用技能（${list.length}）：\n${lines.join('\n')}`
+  }
+
+  /** Add/update a global skill by writing its SKILL.md. Validates the name
+   * (safe segment, no traversal), the frontmatter (must carry name+description,
+   * name must match) and the size. Hot-effective: next catalog/load sees it. */
+  addSkill({ name, content }) {
+    const v = validateSkillContent({ name, content })
+    if (!v.ok) return v
+    const dir = path.join(this.#globalDir, name)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), content, 'utf8')
+    return { ok: true, name }
+  }
+
+  /** Remove a global skill directory (validated name only — cannot escape the
+   * skills root). */
+  removeSkill({ name }) {
+    if (!SKILL_NAME_RE.test(String(name))) return { ok: false, error: `技能名不合法：${name}` }
+    const dir = path.join(this.#globalDir, String(name))
+    if (!dir.startsWith(path.resolve(this.#globalDir) + path.sep)) return { ok: false, error: '路径不安全' }
+    fs.rmSync(dir, { recursive: true, force: true })
+    return { ok: true, name }
+  }
 }
 
 function parseDefaultEnabled(raw) {
@@ -111,16 +152,42 @@ function findSkill(dir, name) {
 
 function parseSkill(file) {
   try {
-    const raw = fs.readFileSync(file, 'utf8')
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/)
-    if (!m) return { description: '', instructions: raw.trim() }
-    const meta = {}
-    for (const line of m[1].split('\n')) {
-      const mm = line.match(/^([a-zA-Z_]+):\s*(.*)$/)
-      if (mm) meta[mm[1].toLowerCase()] = mm[2].trim()
+    const { meta, instructions } = parseSkillText(fs.readFileSync(file, 'utf8'))
+    return {
+      description: meta.description || '',
+      version: meta.version || '',
+      author: meta.author || '',
+      updatedAt: meta.updated_at || '',
+      instructions,
     }
-    return { description: meta.description || '', instructions: m[2].trim() }
   } catch (e) {
-    return { description: '', instructions: '' }
+    return { description: '', version: '', author: '', updatedAt: '', instructions: '' }
   }
+}
+
+/** Split a SKILL.md into frontmatter meta (lowercased keys) + body. */
+export function parseSkillText(raw) {
+  const m = String(raw).match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/)
+  if (!m) return { meta: {}, instructions: String(raw).trim() }
+  const meta = {}
+  for (const line of m[1].split('\n')) {
+    const mm = line.match(/^([a-zA-Z_]+):\s*(.*)$/)
+    if (mm) meta[mm[1].toLowerCase()] = mm[2].trim()
+  }
+  return { meta, instructions: m[2].trim() }
+}
+
+/** Validate a skill payload before it is written by manage_skill (ADR-0013):
+ * name must be a safe segment, content must parse with a name+description
+ * frontmatter whose name matches, and must stay under the size cap. */
+export function validateSkillContent({ name, content, maxBytes = MAX_SKILL_BYTES }) {
+  const n = String(name || '')
+  if (!SKILL_NAME_RE.test(n)) return { ok: false, error: `技能名不合法：${JSON.stringify(name)}（只允许小写字母/数字/连字符，1-64 字符）` }
+  if (typeof content !== 'string' || !content.trim()) return { ok: false, error: '技能内容为空' }
+  if (Buffer.byteLength(content, 'utf8') > maxBytes) return { ok: false, error: `技能内容超过 ${maxBytes / 1024}KB 上限` }
+  const { meta } = parseSkillText(content)
+  if (!meta.name) return { ok: false, error: '缺少 frontmatter 的 name 字段' }
+  if (String(meta.name) !== n) return { ok: false, error: `frontmatter 的 name（${meta.name}）与目录名不一致` }
+  if (!meta.description) return { ok: false, error: '缺少 frontmatter 的 description 字段' }
+  return { ok: true }
 }
