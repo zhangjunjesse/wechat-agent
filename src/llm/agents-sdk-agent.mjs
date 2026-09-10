@@ -36,13 +36,13 @@ export class AgentsSdkAgent {
 
   async #summarize(turns) {
     try {
-      const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-chat', messages: [{ role: 'user', content: buildSummarizePrompt(turns) }], temperature: 0, max_tokens: 800 })
+      const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-v4.1-flash', messages: [{ role: 'user', content: buildSummarizePrompt(turns) }], temperature: 0, max_tokens: 800 })
       return (resp.choices?.[0]?.message?.content || '').trim()
     } catch (e) { return '' }
   }
 
   async #complete(messages, { temperature = 0, maxTokens = 600 } = {}) {
-    const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-chat', messages, temperature, max_tokens: maxTokens })
+    const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-v4.1-flash', messages, temperature, max_tokens: maxTokens })
     return (resp.choices?.[0]?.message?.content || '').trim()
   }
 

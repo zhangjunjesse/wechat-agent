@@ -31,7 +31,7 @@ const llm = new (await import('openai')).default({ apiKey: process.env.OPENAI_AP
 const memoryManager = new MemoryManager({
   store: memoryStore,
   extractor: new MemoryExtractor({ complete: async (messages, opts = {}) => {
-    const r = await llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-chat', messages, temperature: opts.temperature ?? 0, max_tokens: opts.maxTokens ?? 600 })
+    const r = await llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-v4.1-flash', messages, temperature: opts.temperature ?? 0, max_tokens: opts.maxTokens ?? 600 })
     return (r.choices?.[0]?.message?.content || '').trim()
   } }),
 })
@@ -58,7 +58,7 @@ const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PU
 const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
-const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-chat', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
+const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-v4.1-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
 
 const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot })
 const port = Number(process.env.PORT || 8787)
