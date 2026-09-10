@@ -11,10 +11,27 @@ import { renderPage } from './ui-page.mjs'
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null }) {
   const owned = []
   let polling
+  const lastPollLog = new Map() // providerBotId -> { at, error }
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
   const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens })
   const verification = verifier ? new VerificationService({ verifier, store: profileStore }) : null
-  polling = new PollingService({ provider, router, intervalMs: pollIntervalMs })
+  // Polling failures (e.g. iLink session timeout -14) mark the binding as
+  // expired so the UI can tell the user to re-bind; log throttled to avoid
+  // spamming on a 1s poll loop.
+  function onPollError(error, providerBotId) {
+    const now = Date.now()
+    const prev = lastPollLog.get(providerBotId)
+    const live = owned.find((x) => x.providerBotId === providerBotId)
+    if (live) {
+      live.sessionExpired = true
+      live.lastPollError = error?.message || String(error)
+    }
+    if (!prev || now - prev.at > 30_000 || prev.error !== error?.message) {
+      console.warn(`[poll:${providerBotId}] ${error?.message || error}`)
+      lastPollLog.set(providerBotId, { at: now, error: error?.message || String(error) })
+    }
+  }
+  polling = new PollingService({ provider, router, intervalMs: pollIntervalMs, onError: onPollError })
   void bindings.restoreAndStart().then((records) => records.forEach(bind)).catch(() => {})
   function bind(binding) { const index = owned.findIndex((x) => x.id === binding.id); if (index >= 0) owned[index] = binding; else owned.push(binding) }
 
@@ -49,7 +66,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'GET' && profileMatch) return json(res, 200, { profile: await profileStore?.get(assertHeader(req, 'x-user-id')) })
       if (req.method === 'POST' && url.pathname === '/api/chat') { const body = await readJson(req); const browserId = assertHeader(req, 'x-user-id'); const text = String(body.text || '').trim(); if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' }); const profile = await profileStore?.get(browserId); if (process.env.NODE_ENV === 'production' && !profile?.nickname && !profile?.wxid) return json(res, 403, { error: 'verification_required', message: '请先完成身份验证。' }); const userId = await profileStore?.stableKey(browserId); const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
-      if (req.method === 'GET' && match) { const binding = await bindings.refresh(assertHeader(req, 'x-user-id'), match[1]); bind(binding); return json(res, 200, binding) }
+      if (req.method === 'GET' && match) { const binding = await bindings.refresh(assertHeader(req, 'x-user-id'), match[1]); bind(binding); const live = owned.find((x) => x.id === binding.id); return json(res, 200, { ...binding, sessionExpired: live?.sessionExpired === true || false, lastPollError: live?.lastPollError || '' }) }
       if (req.method === 'POST' && url.pathname === '/api/bot/webhook') return json(res, 200, await router.handleInbound(await readJson(req)))
       return json(res, 404, { error: 'not_found' })
     } catch (error) { return json(res, error.message === 'unauthorized' ? 401 : 400, { error: error.message }) }
