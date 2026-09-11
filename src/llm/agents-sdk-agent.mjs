@@ -84,7 +84,9 @@ export class AgentsSdkAgent {
     // loadedSkills is a fresh Set per turn: use_skill uses it to avoid
     // re-returning the same skill's full instructions if the model calls it
     // more than once while working through one user message.
-    const result = await run(this.#makeAgent(instructions, tools), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments } })
+    // maxTurns: multi-step tool tasks (research, image, report) regularly
+    // exceed the SDK default of 10 — make it configurable (AGENT_MAX_TURNS).
+    const result = await run(this.#makeAgent(instructions, tools), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments }, maxTurns: Number(process.env.AGENT_MAX_TURNS || 30) })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
 
     let { transcript } = this.#sessions.append(userId, text, answer, attachments)
