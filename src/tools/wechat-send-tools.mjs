@@ -71,7 +71,14 @@ export function wechatSendTools({ provider, root = process.env.USER_FILES_ROOT |
       if (typeof send !== 'function') {
         return '当前微信通道无法直接发送该类型文件——请改用 write_file，我会给你一个下载链接。'
       }
-      await send({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName, buffer })
+      try {
+        await send({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName, buffer })
+      } catch (error) {
+        // Log the real failure — the model tends to paraphrase tool errors,
+        // which has made diagnosing send failures hard (see troubleshooting).
+        console.error(`[send_file:${userId}] ${fileName} -> ${error?.stack || error?.message || error}`)
+        return `发送失败：${error?.message || error}`
+      }
       // Label the actual channel used: media that fell back to the FILE
       // channel is delivered as a file attachment, not as media.
       const deliveredKind = preferred !== 'sendFile' && send !== provider.sendFile ? kind : 'file'

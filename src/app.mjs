@@ -16,19 +16,19 @@ export function createApp({ provider, agent = { async respond({ text }) { return
   const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens })
   const verification = verifier ? new VerificationService({ verifier, store: profileStore }) : null
   // Polling failures (e.g. iLink session timeout -14) mark the binding as
-  // expired so the UI can tell the user to re-bind; log throttled to avoid
-  // spamming on a 1s poll loop.
+  // expired so the UI can tell the user to re-bind; the error is logged once
+  // per distinct message, not once per 1s poll tick.
   function onPollError(error, providerBotId) {
-    const now = Date.now()
-    const prev = lastPollLog.get(providerBotId)
+    const msg = error?.message || String(error)
     const live = owned.find((x) => x.providerBotId === providerBotId)
     if (live) {
       live.sessionExpired = true
-      live.lastPollError = error?.message || String(error)
+      live.lastPollError = msg
     }
-    if (!prev || now - prev.at > 30_000 || prev.error !== error?.message) {
-      console.warn(`[poll:${providerBotId}] ${error?.message || error}`)
-      lastPollLog.set(providerBotId, { at: now, error: error?.message || String(error) })
+    const prev = lastPollLog.get(providerBotId)
+    if (!prev || prev.error !== msg) {
+      console.warn(`[poll:${providerBotId}] ${msg}`)
+      lastPollLog.set(providerBotId, { at: Date.now(), error: msg })
     }
   }
   polling = new PollingService({ provider, router, intervalMs: pollIntervalMs, onError: onPollError })
