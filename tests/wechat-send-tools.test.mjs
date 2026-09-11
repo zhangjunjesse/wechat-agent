@@ -189,3 +189,25 @@ test('send_file refuses a video over the media size cap (env SEND_MEDIA_MAX_MB)'
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('send_file calls media methods as provider methods, preserving `this`', async () => {
+  const root = tmpRoot()
+  await fsp.mkdir(path.join(root, 'u1'), { recursive: true })
+  await fsp.writeFile(path.join(root, 'u1', 'pic.png'), Buffer.alloc(64 * 1024))
+  try {
+    // Real class methods need `this` (ILinkProvider.sendImage uses
+    // #requireSendSession/#uploadMedia). A plain method here fails loudly if
+    // the tool calls the unbound reference (this === undefined).
+    const provider = {
+      sent: [],
+      sendImage: async function (args) { this.sent.push(args); return { providerMessageId: 'ilink-img' } },
+    }
+    const { sendFile } = wechatSendTools({ provider, root })
+    const out = await call(sendFile, { path: 'pic.png' }, ilinkCtx())
+    assert.match(out, /已发送图片.*pic\.png/)
+    assert.equal(provider.sent.length, 1)
+    assert.equal(provider.sent[0].fileName, 'pic.png')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

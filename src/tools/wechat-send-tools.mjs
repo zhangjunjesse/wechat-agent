@@ -72,7 +72,12 @@ export function wechatSendTools({ provider, root = process.env.USER_FILES_ROOT |
         return '当前微信通道无法直接发送该类型文件——请改用 write_file，我会给你一个下载链接。'
       }
       try {
-        await send({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName, buffer })
+        // Call as a method on `provider`: sendImage/sendVideo/sendFile are
+        // real class methods that need `this` (#uploadMedia/#sendMediaItem);
+        // calling the unbound reference would lose `this` and blow up with a
+        // confusing 'reading ILinkProvider' TypeError (V8 names the class in
+        // private-member brand checks on undefined this).
+        await send.call(provider, { providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName, buffer })
       } catch (error) {
         // Log the real failure — the model tends to paraphrase tool errors,
         // which has made diagnosing send failures hard (see troubleshooting).
