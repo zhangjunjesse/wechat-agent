@@ -1,4 +1,5 @@
 import { beijingNowLine } from '../services/time.mjs'
+import { PACE_RULES } from './conversation-pace.mjs'
 
 /** Safety rules injected into the static instructions, before role/identity.
  *
@@ -43,6 +44,8 @@ export function buildBaseInstructions() {
     '【工具使用规则】',
     ...TOOL_USAGE_RULES,
     '',
+    ...PACE_RULES,
+    '',
     '【技能】可用技能的名称与简介见 use_skill 工具描述；用户需求命中某项时，必须先调用 use_skill 加载该技能完整指令再执行，不得凭名字猜测，也不得只提到技能名却不实际调用。',
   ]
   return parts.join('\n')
@@ -58,7 +61,7 @@ export function buildBaseInstructions() {
  * itself, resolved from memory (user's naming) by the caller, falling back to
  * '助手'. It must NOT be read from a second place (e.g. profile) — that caused
  * a self-naming conflict. */
-export function buildDynamicSystem({ nickname = '', assistantName = '助手', memories = '', summary = '', nowMs = Date.now() } = {}) {
+export function buildDynamicSystem({ nickname = '', assistantName = '助手', memories = '', summary = '', sinceLastSeen = '', nowMs = Date.now() } = {}) {
   const lines = []
   lines.push(`你的名字是${assistantName}。`)
   if (nickname) {
@@ -67,6 +70,9 @@ export function buildDynamicSystem({ nickname = '', assistantName = '助手', me
     lines.push('当前用户尚未完成身份验证，仅提供引导。')
   }
   lines.push(beijingNowLine(nowMs))
+  // ADR-0015: 时间流逝感知 —— 间隔行来自 conversation-pace.buildGapLine，
+  // 位置在时间之后、记忆之前；空串则不注入。
+  if (sinceLastSeen) lines.push(sinceLastSeen)
   if (memories) lines.push('', memories)
   if (summary) lines.push('', `此前对话要点：\n${summary}`)
   return lines.join('\n')

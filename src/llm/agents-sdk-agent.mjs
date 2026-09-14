@@ -8,6 +8,7 @@ import { MemoryManager } from './memory-manager.mjs'
 import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
 import { buildUseSkillTool } from '../tools/misc-tools.mjs'
 import { wrapClientForDeepSeek } from './deepseek-thinking-client.mjs'
+import { buildGapLine } from './conversation-pace.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -61,12 +62,14 @@ export class AgentsSdkAgent {
     const attachmentText = attachments.length
       ? `\n\n本轮已收到附件：\n${attachments.map((a) => `- ${a.name || '未命名'}（路径：${a.path || '不可用'}，大小：${a.size || '未知'}字节）`).join('\n')}\n附件未被实际工具读取前，不要声称已经看过内容。`
       : ''
+    const nowMs = Date.now()
     const context = buildDynamicSystem({
       nickname: profile?.nickname || '',
       assistantName: this.#memory.assistantName(userId),
       memories,
       summary: session.summary || '',
-      nowMs: Date.now(),
+      sinceLastSeen: buildGapLine(session.updatedAt, nowMs),
+      nowMs,
     })
     const enabledGlobal = this.#skillRegistry?.resolveEnabled(profile?.enabledSkills)
     // Fresh reasoning cache per run: multi-turn tool calls inside this run

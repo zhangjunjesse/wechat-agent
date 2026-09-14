@@ -63,3 +63,19 @@ export function beijingParse(str, { endOfDay = false } = {}) {
   const minute = mi != null ? Number(mi) : (endOfDay ? 59 : 0)
   return Date.UTC(Number(y), Number(mo) - 1, Number(d), hour, minute) - BEIJING_OFFSET_MS
 }
+
+/** Humanize an elapsed duration (ms) for "time passed since last chat" lines.
+ * Timezone-independent (pure math on the duration), simplified to the two
+ * most useful units: <1h minutes, <24h hours+minutes, <7d days+hours, else
+ * just days (a 32-day gap reads better than "32 天 5 小时"). */
+export function humanizeGap(ms) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000))
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours < 24) return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+  const days = Math.floor(hours / 24)
+  const remHours = hours % 24
+  if (days >= 7) return `${days} 天`
+  return remHours ? `${days} 天 ${remHours} 小时` : `${days} 天`
+}

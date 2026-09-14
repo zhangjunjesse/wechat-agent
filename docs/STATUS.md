@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **131/131 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **174/174 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -21,7 +21,7 @@
   （把 `channel`/`userId` 透传给工具）；多租户（web + iLink 统一 tenant key）。
 - 能力：记忆（MEMORY-SPEC.md）、会话压缩、沙箱 run_code、文件读写、聊天记录搜索
   skill、渐进式动态技能系统、二进制文档生成、文件/图片/视频发送、公众号调研。
-- 决策记录：`docs/ADR-0001` ~ `ADR-0013`，新增决策前先读 spec-loop 约定。
+- 决策记录：`docs/ADR-0001` ~ `ADR-0015`，新增决策前先读 spec-loop 约定。
 
 ## 技能系统（ADR-0005/0006/0013，渐进式动态管理）
 
@@ -51,6 +51,14 @@
 - 投递：到点 agent 执行指令（复用全部工具/技能）→ iLink 推微信；依赖
   `ContextTokenCache`（入站消息更新，落盘重启恢复）。无 token/未验证用户跳过。
 - 存储：`data/tasks.db`（SQLite）。
+
+## 会话时间感知（ADR-0015）
+
+- 问题：transcript 无时间戳，模型感知不到"距上次对话多久"，隔天对话生硬接续旧话题。
+- 方案：信息 + 用法两层——动态层 `buildGapLine`（间隔 >2h 注入「距上次对话：4 天 3 小时。」，
+  阈值 `GAP_THRESHOLD_MS` env 可配）+ 静态层 `PACE_RULES`（对话节奏规则）。
+- **集中管理**：全部收敛在 `src/llm/conversation-pace.mjs`，改文案/阈值只动这一个文件；
+  `humanizeGap` 在 `src/services/time.mjs`。时间源复用 `sessions.updated_at`，存储零改动。
 
 ## 消息发送能力（ADR-0008/0009/0012）
 
