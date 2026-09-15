@@ -40,10 +40,12 @@ test('authUrl embeds app id, redirect uri and state', () => {
 })
 
 test('exchangeCode stores per-user token; ensureToken refreshes when expired', async () => {
+  const seen = []
   const { file, tokenStore, client } = setup({
     routes: [
-      { test: (u) => u.includes('/authen/v1/oidc/access_token'), body: { code: 0, data: { access_token: 'tok-1', refresh_token: 'ref-1', expires_in: 10, refresh_expires_in: 3600 } } },
-      { test: (u) => u.includes('/authen/v1/oidc/refresh_access_token'), body: { code: 0, data: { access_token: 'tok-2', refresh_token: 'ref-2', expires_in: 7200, refresh_expires_in: 3600 } } },
+      { test: (u, init) => u.includes('/auth/v3/tenant_access_token/internal'), body: { code: 0, tenant_access_token: 'tenant-1' } },
+      { test: (u, init) => { seen.push([u, init]); return u.includes('/authen/v1/oidc/access_token') }, body: { code: 0, data: { access_token: 'tok-1', refresh_token: 'ref-1', expires_in: 10, refresh_expires_in: 3600 } } },
+      { test: (u, init) => { seen.push([u, init]); return u.includes('/authen/v1/oidc/refresh_access_token') }, body: { code: 0, data: { access_token: 'tok-2', refresh_token: 'ref-2', expires_in: 7200, refresh_expires_in: 3600 } } },
     ],
   })
   try {
@@ -51,12 +53,17 @@ test('exchangeCode stores per-user token; ensureToken refreshes when expired', a
     const t = tokenStore.get('u1')
     assert.equal(t.accessToken, 'tok-1')
     assert.equal(t.refreshToken, 'ref-1')
+    // oidc 请求必须带 tenant_access_token 作为 Bearer（否则飞书 20014）
+    const oidcReq = seen.find(([u]) => u.includes('oidc/access_token'))
+    assert.match(oidcReq[1].headers.Authorization, /Bearer tenant-1/)
     // 未过期直接用
     assert.equal(await client.ensureToken('u1'), 'tok-1')
-    // 手动把 expires_at 拨回过去 → ensureToken 自动刷新
+    // 手动把 expires_at 拨回过去 → ensureToken 自动刷新（刷新也带 tenant）
     tokenStore.set({ userId: 'u1', accessToken: 'tok-1', refreshToken: 'ref-1', expiresIn: -10, refreshExpiresIn: 3600 })
     assert.equal(await client.ensureToken('u1'), 'tok-2')
     assert.equal(tokenStore.get('u1').accessToken, 'tok-2')
+    const refReq = seen.find(([u]) => u.includes('oidc/refresh_access_token'))
+    assert.match(refReq[1].headers.Authorization, /Bearer tenant-1/)
     // 未授权用户
     await assert.rejects(() => client.ensureToken('u2'), /尚未授权/)
     // refresh token 也过期 → 明确提示重新授权
@@ -80,6 +87,20 @@ test('readDoc fetches markdown raw content from a docx link', async () => {
     assert.equal(r.docId, 'W1abc12345')
     assert.match(r.content, /# 标题/)
     assert.equal(r.length, r.content.length)
+  } finally {
+    tokenStore.close(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('business errors surface the feishu message field, not bare HTTP 200', async () => {
+  const { file, tokenStore, client } = setup({
+    routes: [
+      { test: (u) => u.includes('/raw_content'), body: { code: 20014, message: 'The app access token passed is invalid. Please check the value.' } },
+    ],
+  })
+  try {
+    tokenStore.set({ userId: 'u1', accessToken: 'tok', refreshToken: 'r', expiresIn: 7200, refreshExpiresIn: 3600 })
+    await assert.rejects(() => client.readDoc('u1', 'W1abc12345'), /飞书 API 错误\(20014\): The app access token/)
   } finally {
     tokenStore.close(); fs.rmSync(file, { force: true })
   }

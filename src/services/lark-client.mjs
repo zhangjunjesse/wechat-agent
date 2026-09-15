@@ -41,11 +41,20 @@ export class LarkClient {
     return `${this.#baseUrl}/open-apis/authen/v1/index?${q.toString()}`
   }
 
-  /** 授权回调：用 code 换 token 并存库。 */
+  /** 应用级 tenant_access_token（oidc 系列接口要求带它作为 Bearer，否则 20014）。 */
+  async #tenantToken() {
+    const body = await this.#post('/open-apis/auth/v3/tenant_access_token/internal', { app_id: this.#appId, app_secret: this.#appSecret })
+    const t = body?.tenant_access_token
+    if (!t) throw new Error(`获取应用 token 失败：${JSON.stringify(body).slice(0, 200)}`)
+    return t
+  }
+
+  /** 授权回调：用 code 换 token 并存库（oidc 接口：body 只需 grant_type+code，鉴权走 Bearer tenant）。 */
   async exchangeCode({ code, userId }) {
+    const tenant = await this.#tenantToken()
     const body = await this.#post('/open-apis/authen/v1/oidc/access_token', {
-      grant_type: 'authorization_code', code, app_id: this.#appId, app_secret: this.#appSecret,
-    })
+      grant_type: 'authorization_code', code,
+    }, tenant)
     const d = body?.data || {}
     if (!d.access_token) throw new Error(`换 token 失败：${JSON.stringify(body).slice(0, 200)}`)
     this.#store.set({
@@ -63,9 +72,10 @@ export class LarkClient {
     if (!t.refreshToken || Date.now() >= t.refreshExpiresAt) {
       throw new Error('飞书授权已过期，请让用户重新授权')
     }
+    const tenant = await this.#tenantToken()
     const body = await this.#post('/open-apis/authen/v1/oidc/refresh_access_token', {
-      grant_type: 'refresh_token', refresh_token: t.refreshToken, app_id: this.#appId, app_secret: this.#appSecret,
-    })
+      grant_type: 'refresh_token', refresh_token: t.refreshToken,
+    }, tenant)
     const d = body?.data || {}
     if (!d.access_token) throw new Error(`刷新 token 失败：${JSON.stringify(body).slice(0, 200)}`)
     this.#store.set({
@@ -138,7 +148,9 @@ export class LarkClient {
     let body = {}
     try { body = await resp.json() } catch { /* non-json */ }
     if (!resp.ok || (body.code !== undefined && body.code !== 0)) {
-      throw new Error(body.msg || `飞书 API 错误 HTTP ${resp.status}`)
+      // 飞书业务错误：code + msg/message（新版用 message 字段）
+      const detail = body.msg || body.message || ''
+      throw new Error(detail ? `飞书 API 错误(${body.code}): ${detail}` : `飞书 API 错误 HTTP ${resp.status}`)
     }
     return body
   }
