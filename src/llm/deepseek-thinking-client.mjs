@@ -48,13 +48,10 @@ export function wrapClientForDeepSeek(client) {
     }).catch((err) => {
       // 现场诊断（生产实测 400 reasoning_content，定位请求结构差异用）
       if (String(err?.message || '').includes('reasoning_content')) {
-        const summary = (body?.messages || []).map((m) => {
-          const tag = m?.role === 'assistant'
-            ? `${m.tool_calls ? '[tc]' : ''}${'reasoning_content' in m ? '[rc]' : '[no-rc]'}${m.content == null ? '[null]' : `[${String(m.content).length}ch]`}`
-            : ''
-          return `${m?.role}${tag}`
-        }).join(' , ')
-        console.error(`[thinking-400] rc_len=${rc.length} msg_count=${body?.messages?.length || 0}\n  ${summary}`)
+        const msgs = body?.messages || []
+        const asIdx = msgs.map((m, i) => (m?.role === 'assistant' ? i : -1)).filter((i) => i >= 0)
+        const show = (m) => JSON.stringify(m).slice(0, 400)
+        console.error(`[thinking-400] rc_len=${rc.length} msg_count=${msgs.length} assistant_count=${asIdx.length}\n  first_as: ${show(msgs[asIdx[0]])}\n  last_as: ${show(msgs[asIdx[asIdx.length - 1]])}`)
       }
       throw err
     })

@@ -134,20 +134,29 @@ export class GroupCommandWatcher {
       instruction ? `🗣 用户的指令：${instruction}` : '',
       `📍 发送时间：${new Date(Number(row.ts) * 1000).toISOString()}`,
       '处理完成后请把结果私聊推送给用户。',
-      `如需更多上下文，可用 wechat_search_chat 查询群「${chatName}」最近的聊天记录；引用内容若是飞书链接用 lark_read_doc 读取；若是文件/图片，如实说明能做什么。`,
+      `如需更多上下文，可用 wechat_search_chat 查询群「${chatName}」最近的聊天记录（**控制条数，默认 ≤20 条**）；引用内容若是飞书链接用 lark_read_doc 读取；若是文件/图片，如实说明能做什么。回答能力类问题要简洁，不要一次性拉取全部消息。`,
     ].filter(Boolean).join('\n')
 
-    // 5) agent 处理 → iLink 私聊推送
-    const reply = await this.#agent.respond({
+    // 5) 秒回确认（体验：大任务不让用户干等）+ agent 处理 + 超时提示
+    const push = (msg) => this.#provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken, text: msg })
+    await push('✅ 收到你的指令，正在处理，请稍候（内容较多时可能需要一两分钟）。处理完我会私聊推送结果。')
+    const respondPromise = this.#agent.respond({
       userId,
       text,
       profile,
       channel: { type: 'ilink', providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken },
     })
-    const out = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
-    if (out) {
-      await this.#provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken, text: out })
+    // 90s 未完成先推一条"还在处理"，随后继续等原任务（不重复调 agent）
+    let slowTimer = null
+    const timeout = new Promise((res) => { slowTimer = setTimeout(() => res({ slow: true }), 90_000); slowTimer.unref?.() })
+    const first = await Promise.race([respondPromise.then((r) => ({ slow: false, r })), timeout])
+    if (first?.slow) {
+      await push('⏳ 任务还在处理中（内容较多），请再稍等片刻…')
     }
+    clearTimeout(slowTimer)
+    const reply = await respondPromise
+    const out = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
+    if (out) await push(out)
   }
 
   #flushCursor() {

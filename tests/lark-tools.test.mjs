@@ -57,3 +57,24 @@ test('lark_auth_status reflects granted token; read/search call through to the c
     tokenStore.close(); fs.rmSync(file, { force: true })
   }
 })
+
+test('lark_export_doc saves the exported file into the user sandbox and asks for send_file', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-root-'))
+  const buffer = Buffer.from('%PDF-1.4 fake')
+  const client = {
+    authUrl: () => 'https://auth.example',
+    tokenStore: { get: () => ({ accessToken: 'tok' }) },
+    exportDoc: async (_userId, doc, { ext }) => ({ fileName: `报告.${ext}`, ext, buffer, title: '报告' }),
+  }
+  const tools = larkTools({ client, redirectUri: 'https://x/cb', root })
+  try {
+    const out = await call(tools.larkExportDoc, { doc: 'https://x.feishu.cn/docx/W1abc12345', format: 'pdf' }, { context: { userId: 'u1' } })
+    assert.match(out, /已导出「报告\.pdf」/)
+    assert.match(out, /文件路径：files\/报告\.pdf/)
+    assert.match(out, /send_file/)
+    const saved = fs.readFileSync(path.join(root, 'u1', 'files', '报告.pdf'))
+    assert.equal(saved.toString(), '%PDF-1.4 fake')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

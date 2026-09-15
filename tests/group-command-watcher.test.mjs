@@ -58,9 +58,11 @@ test('watcher turns a group @助手 quote into an agent call and a private push'
     // 身份与私聊通道：会话键 = ilinkUserId（与私聊一致），不是浏览器档案 id
     assert.equal(calls[0].userId, 'ilink_zj')
     assert.equal(calls[0].channel.toProviderUserId, 'ilink_zj')
-    assert.equal(sent.length, 1)
+    // 秒回 ack（先确认，再结果）
+    assert.equal(sent.length, 2)
+    assert.match(sent[0].text, /收到你的指令，正在处理/)
     assert.equal(sent[0].toProviderUserId, 'ilink_zj')
-    assert.match(sent[0].text, /已处理：看一下/)
+    assert.match(sent[1].text, /已处理：看一下/)
     // 第二轮 sweep 不重复（msg_id 去重 + 游标推进）
     await watcher.sweep()
     assert.equal(calls.length, 1)
@@ -112,7 +114,8 @@ test('watcher picks the matching profile that has a push channel, skipping token
     assert.equal(calls.length, 1)
     assert.equal(calls[0].userId, 'ilink_zj') // 会话键 = 稳定 ilinkUserId（与私聊一致）
     assert.equal(calls[0].channel.toProviderUserId, 'ilink_zj')
-    assert.equal(sent.length, 1)
+    assert.equal(sent.length, 2) // ack + 结果
+    assert.match(sent[0].text, /收到你的指令/)
   } finally {
     fs.rmSync(cursorFile, { force: true })
   }

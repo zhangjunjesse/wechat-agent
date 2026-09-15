@@ -1,4 +1,7 @@
 import { tool } from '@openai/agents'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { resolveUserPath } from '../services/user-sandbox.mjs'
 
 /** 飞书文档工具集（ADR-0021，与 skills/lark-docs 技能配合：工具做原子 API，
  * 技能做编排 SOP）。按 user_id 取各自 token，严格隔离。
@@ -8,7 +11,7 @@ import { tool } from '@openai/agents'
  *
  * 写操作（lark_create_doc/lark_edit_doc）工具描述强制：执行前必须用 ask_user
  * 向用户复述将要做的改动并等用户确认——重要操作先确认是产品约定。 */
-export function larkTools({ client, redirectUri } = {}) {
+export function larkTools({ client, redirectUri, root = process.env.USER_FILES_ROOT || 'data/user-files' } = {}) {
   const authUrlFor = (userId) => client.authUrl({ redirectUri, state: userId })
 
   const larkAuth = tool({
@@ -146,5 +149,37 @@ export function larkTools({ client, redirectUri } = {}) {
     },
   })
 
-  return { larkAuth, larkAuthStatus, larkSearchDocs, larkReadDoc, larkCreateDoc, larkEditDoc }
+  const larkExportDoc = tool({
+    name: 'lark_export_doc',
+    description:
+      '把一个飞书云文档导出成文件（默认 pdf，可选 docx），保存到用户文件目录并返回路径。' +
+      '用户说"把这个飞书文档下载给我""导出成 PDF 发我""把这个文档发我一份"时使用；' +
+      '导出完成后**必须调用 send_file** 把文件作为真实消息发给用户。' +
+      '导出是异步任务，通常几秒到几十秒，请耐心等待工具返回。',
+    parameters: {
+      type: 'object',
+      properties: {
+        doc: { type: 'string', description: '飞书文档链接或文档 id' },
+        format: { type: 'string', enum: ['pdf', 'docx'], description: '导出格式，默认 pdf' },
+      },
+      required: ['doc'],
+    },
+    execute: async (input, ctx) => {
+      const userId = ctx?.context?.userId
+      if (!client) return '飞书功能未启用（服务器未配置 LARK_APP_ID/LARK_APP_SECRET）。'
+      try {
+        const ext = input.format === 'docx' ? 'docx' : 'pdf'
+        const { fileName, buffer } = await client.exportDoc(userId, input.doc, { ext })
+        const rel = `files/${fileName}`
+        const full = resolveUserPath(root, userId, rel)
+        await fs.mkdir(path.dirname(full), { recursive: true })
+        await fs.writeFile(full, buffer)
+        return `已导出「${fileName}」（${Math.round(buffer.length / 1024)} KB），文件路径：${rel}\n请调用 send_file 把该文件发给用户。`
+      } catch (e) {
+        return `导出失败：${e.message}`
+      }
+    },
+  })
+
+  return { larkAuth, larkAuthStatus, larkSearchDocs, larkReadDoc, larkCreateDoc, larkEditDoc, larkExportDoc }
 }

@@ -92,8 +92,7 @@ test('readDoc fetches markdown raw content from a docx link', async () => {
   }
 })
 
-test('business errors surface the feishu message field, not bare HTTP 200', async () => {
-  const { file, tokenStore, client } = setup({
+test('business errors surface the feishu message field, not bare HTTP 200', async () => {  const { file, tokenStore, client } = setup({
     routes: [
       { test: (u) => u.includes('/raw_content'), body: { code: 20014, message: 'The app access token passed is invalid. Please check the value.' } },
     ],
@@ -128,6 +127,57 @@ test('searchDocs / createDoc / appendBlocks hit the right endpoints', async () =
     // 请求带 Bearer token
     const searchReq = seen.find(([u]) => u.includes('search/object'))
     assert.match(searchReq[1].headers.Authorization, /Bearer tok/)
+  } finally {
+    tokenStore.close(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('exportDoc creates a task, polls to completion and downloads the file', async () => {
+  let polls = 0
+  const fakeFetch = async (url, init = {}) => {
+    const u = String(url)
+    const ok = (body) => ({ ok: true, status: 200, json: async () => body })
+    if (u.includes('/docx/v1/documents/') && !u.includes('/raw_content')) return ok({ code: 0, data: { document: { title: '季度总结/报告' } } })
+    if (u.includes('/drive/v1/export_tasks') && init.method === 'POST') return ok({ code: 0, data: { ticket: 'tk-1' } })
+    if (u.includes('/drive/v1/export_tasks/tk-1')) {
+      polls++
+      return ok({ code: 0, data: { result: polls < 2 ? { job_status: 2 } : { job_status: 0, file_token: 'ft-1' } } })
+    }
+    if (u.includes('/export_tasks/file/ft-1/download')) {
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]).buffer } // %PDF
+    }
+    return { ok: false, status: 404, json: async () => ({ code: 404, message: `no route ${u}` }) }
+  }
+  const file = path.join(os.tmpdir(), `lark-exp-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const tokenStore = new LarkTokenStore({ file })
+  const client = new LarkClient({ appId: 'a', appSecret: 's', tokenStore, fetchImpl: fakeFetch })
+  try {
+    tokenStore.set({ userId: 'u1', accessToken: 'tok', refreshToken: 'r', expiresIn: 7200, refreshExpiresIn: 3600 })
+    const r = await client.exportDoc('u1', 'https://x.feishu.cn/docx/W1abc12345', { ext: 'pdf' })
+    assert.equal(r.ext, 'pdf')
+    assert.equal(r.fileName, '季度总结_报告.pdf') // 非法字符被安全化
+    assert.ok(r.buffer.length === 4)
+    assert.ok(polls >= 2) // 轮询到完成
+  } finally {
+    tokenStore.close(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('exportDoc surfaces task failure with the reason', async () => {
+  const fakeFetch = async (url, init = {}) => {
+    const u = String(url)
+    const ok = (body) => ({ ok: true, status: 200, json: async () => body })
+    if (u.includes('/docx/v1/documents/')) return ok({ code: 0, data: { document: { title: 'x' } } })
+    if (u.includes('/drive/v1/export_tasks') && init.method === 'POST') return ok({ code: 0, data: { ticket: 'tk-2' } })
+    if (u.includes('/drive/v1/export_tasks/tk-2')) return ok({ code: 0, data: { result: { job_status: 3, job_error_msg: 'permission denied' } } })
+    return { ok: false, status: 404, json: async () => ({ code: 404 }) }
+  }
+  const file = path.join(os.tmpdir(), `lark-exp2-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const tokenStore = new LarkTokenStore({ file })
+  const client = new LarkClient({ appId: 'a', appSecret: 's', tokenStore, fetchImpl: fakeFetch })
+  try {
+    tokenStore.set({ userId: 'u1', accessToken: 'tok', refreshToken: 'r', expiresIn: 7200, refreshExpiresIn: 3600 })
+    await assert.rejects(() => client.exportDoc('u1', 'W1abc12345'), /导出失败：permission denied/)
   } finally {
     tokenStore.close(); fs.rmSync(file, { force: true })
   }

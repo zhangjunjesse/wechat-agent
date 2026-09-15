@@ -75,7 +75,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     const basePath = process.env.PUBLIC_BASE_PATH || '/wechat-agent/'
     const redirectUri = `${(process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')}${basePath}lark/auth/callback`
     const larkToolsSet = larkTools({ client: lark.client, redirectUri })
-    tools.push(larkToolsSet.larkAuth, larkToolsSet.larkAuthStatus, larkToolsSet.larkSearchDocs, larkToolsSet.larkReadDoc, larkToolsSet.larkCreateDoc, larkToolsSet.larkEditDoc)
+    tools.push(larkToolsSet.larkAuth, larkToolsSet.larkAuthStatus, larkToolsSet.larkSearchDocs, larkToolsSet.larkReadDoc, larkToolsSet.larkCreateDoc, larkToolsSet.larkEditDoc, larkToolsSet.larkExportDoc)
   }
   return tools
 }

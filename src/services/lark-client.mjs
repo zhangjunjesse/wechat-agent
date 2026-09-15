@@ -130,11 +130,51 @@ export class LarkClient {
     return { appended: created.length }
   }
 
+  /** 导出云文档为文件（pdf/docx），返回 { fileName, buffer }。
+   * 飞书导出是异步任务：创建 → 轮询 job_status → 下载 file_token。
+   * 需要应用具备导出权限（drive:export:readonly 等）。 */
+  async exportDoc(userId, docId, { ext = 'pdf' } = {}) {
+    const id = extractDocId(docId)
+    const token = await this.ensureToken(userId)
+    // 文档标题（用于文件名；取不到就退回 doc id）
+    let title = id
+    try {
+      const meta = await this.#get(`/open-apis/docx/v1/documents/${encodeURIComponent(id)}`, token)
+      title = meta?.data?.document?.title || id
+    } catch { /* 标题拿不到不致命 */ }
+    const created = await this.#post('/open-apis/drive/v1/export_tasks', { file_extension: ext, token: id, type: 'docx' }, token)
+    const ticket = created?.data?.ticket
+    if (!ticket) throw new Error(`创建导出任务失败：${JSON.stringify(created).slice(0, 200)}`)
+    const deadline = Date.now() + 120_000
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500))
+      const st = await this.#get(`/open-apis/drive/v1/export_tasks/${encodeURIComponent(ticket)}?token=${encodeURIComponent(id)}`, token)
+      const job = st?.data?.result || {}
+      if (job.job_status === 0) {
+        if (!job.file_token) throw new Error('导出完成但缺少 file_token')
+        const buffer = await this.#getBuffer(`/open-apis/drive/v1/export_tasks/file/${encodeURIComponent(job.file_token)}/download`, token)
+        return { title, ext, buffer, fileName: `${sanitizeName(title)}.${ext}` }
+      }
+      if (job.job_status === 3 || job.job_error_msg) throw new Error(`导出失败：${job.job_error_msg || JSON.stringify(job).slice(0, 150)}`)
+      if (Date.now() > deadline) throw new Error('导出超时（>120s）')
+    }
+  }
+
   // ---- 内部：带错误解析的 HTTP ----
 
   async #get(pathname, token) {
     const resp = await this.#fetch(`${this.#baseUrl}${pathname}`, { headers: { Authorization: `Bearer ${token}` } })
     return this.#parse(resp)
+  }
+
+  async #getBuffer(pathname, token) {
+    const resp = await this.#fetch(`${this.#baseUrl}${pathname}`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!resp.ok) {
+      let detail = ''
+      try { const b = await resp.json(); detail = b.msg || b.message || '' } catch { /* binary error */ }
+      throw new Error(detail ? `飞书 API 错误(${resp.status}): ${detail}` : `飞书 API 错误 HTTP ${resp.status}`)
+    }
+    return Buffer.from(await resp.arrayBuffer())
   }
 
   async #post(pathname, payload, token = null) {
@@ -164,4 +204,13 @@ export function extractDocId(input) {
   const m2 = s.match(/^([A-Za-z0-9]{10,})$/)
   if (m2) return m2[1]
   throw new Error(`无法识别文档地址：${input}（支持 docx 链接或文档 id）`)
+}
+
+/** 文件名安全化（去掉路径分隔符与控制字符，限长）。 */
+export function sanitizeName(name) {
+  return String(name || 'document')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || 'document'
 }
