@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **271/271 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **274/274 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -145,35 +145,36 @@
   `ContextTokenCache`（入站消息更新，落盘重启恢复）。无 token/未验证用户跳过。
 - 存储：`data/tasks.db`（SQLite）。
 
-## 日报管道（ADR-0017，报告类公共任务「生成一次、处处发布」）
+## 日报管道（ADR-0017 + ADR-0018，图文一体海报化）
 
-- 公共任务新增 `kind: 'report'`（默认 `'plain'` 保持旧行为）+ `cover`（封面开关）；
-  `TaskStore` 自动补列迁移，旧库启动不崩。
-- 报告任务执行 = **一次** agent 生成（ephemeral 零副作用执行，合成用户
-  `task-<id>`）→ 结构化 JSON（`focus`/`cover`/`items`）→ 近 7 天指纹机械去重
-  （删后 <3 条保底不删）→ 入库 `data/reports.db`（`ReportStore`，id 按任务+日期
-  幂等）→ 渲染微信摘要（含公网 URL）+ 封面（agent 用 image-studio 技能出图，
-  路径放 JSON.cover）→ 向所有订阅者扇出同一份内容（昵称问候 + 有封面先 sendImage）。
-- 解析失败降级：原始文本直推 + `lastError=report_unparsable`。
-- 公网页：`GET /reports/<id>`（移动优先响应式 HTML，内联 CSS 零依赖）+
-  `GET /reports/<id>/cover`，兼容 `/wechat-agent` 子路径前缀。
-- 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可
-  「第 N 条展开讲讲」（配 `gzh_content` 抓原文）。
-- 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md`。
-- **已部署 + 实测**（2026-09-15）：生产 `datadefender.cn/wechat-agent` 已上线本管道
-  （源码挂载 `/opt/wechat-agent/app`，`docker restart` 生效，env 零改动——容器 WORKDIR=/
-  使默认 `data/xxx` 恰好落在 /data 持久卷）。重启后回拨 `last_run_at` 强制补跑当天一轮：
-  - 报告 `rp-0edff76a-20260915` 生成成功：**7 条 AI/科技要闻**（智谱 50 亿美元融资、
-    AI+脑机接口标准、台积电 CPO、俄罗斯光刻机、DeepSeek Harness、Sam Altman、
-    书生 Intern-S2），每条带公众号来源 + 微信原文链接；
-  - **封面图经 image-studio 技能生成**（`/data/user-files/task-global-每日早报/images/…`，
-    1.8MB PNG），微信先发封面再发正文；
-  - 公网页 `https://datadefender.cn/wechat-agent/reports/<id>` HTTP 200（7 条全部带
-    原文链接）+ `/cover` HTTP 200 image/png；
-  - **推送成功**（`lastError` 为空）——此前旧版本同日推送报 `402 Insufficient Balance`
-    （iLink 侧余额不足），本次未复现。
-  - 实测发现的文案瑕疵：agent 把 schema 提示词「今日关注点：」带进 focus 值 →
-    已加 `normalizeFocus` 渲染层去前缀（271/271 全绿），同步到生产，明天 08:00 轮生效。
+- 公共任务新增 `kind: 'report'`（默认 `'plain'` 保持旧行为）；`TaskStore` 自动补列迁移，
+  旧库启动不崩。
+- 报告任务执行 = **一次** agent 生成（ephemeral 零副作用执行，合成用户 `task-<id>`）
+  → 结构化 JSON（`focus`/`items`）→ 近 7 天指纹机械去重（删后 <3 条保底不删）→ 入库
+  `data/reports.db`（`ReportStore`，id 按任务+日期幂等）→ **海报渲染**（ADR-0018）→
+  向订阅者推送「海报长图 + 短描述（含公网 URL）」。
+- **海报 = HTML 排版 → CDP 无头浏览器截图**（`src/services/poster-render.mjs`）：
+  纯 CSS 科技风头图、新闻卡片（只显示来源名不显示裸 URL）、自动量高全页截图。
+  浏览器：系统 chromium/chrome/edge 或 `@sparticuz/chromium`（Linux 容器）。
+- **技能化**：`skills/poster-render/SKILL.md` + 工具 `render_poster`（agent 对话可用，
+  与 image-studio 分工：信息排版图 vs 视觉图）。
+- 解析失败降级：直推 agent 原文 + `lastError=report_unparsable`；海报渲染失败降级纯文本。
+- 公网页：`GET /reports/<id>`（响应式 HTML）+ `/poster`（海报 PNG）+ `/cover`（兼容旧封面），
+  兼容 `/wechat-agent` 子路径。
+- 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可「第 N 条展开讲讲」。
+- 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
+  `docs/ADR-0018-poster-render.md`。
+- **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线
+  （源码挂载 `/opt/wechat-agent/app`，`docker restart` 生效，env 零改动）：
+  - 第一轮：海报 750×2414（7 条 AI/科技要闻）→ 推送成功（`lastError` 空）；
+  - 第二轮（字体重渲染）：**中文完美**（容器装 `fonts-noto-cjk` + commit 镜像
+    `wechat-agent:chromium`），7 条全新新闻（科创板日报/TechWeb/财联社AI daily…，
+    与第一轮不重复 = **去重生效**），`GET /reports/<id>/poster` HTTP 200；
+  - 实测踩坑已修：容器无中文字体→豆腐块（装 fonts-noto-cjk）；headless shell
+    `--dump-dom` 不可用→改 CDP；browser ws 无 Page 域→attachToTarget(flatten)；
+    root 需 `--no-sandbox`。
+  - 已知小瑕疵：海报曾含 emoji（📰/🎯）在容器缺 emoji 字体时为方框 → 已改纯文字/CSS
+    图标，明天 08:00 轮生效；今日已发海报主体正常。
 
 ## 会话时间感知（ADR-0015）
 

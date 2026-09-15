@@ -16,9 +16,9 @@ const DEDUP_WINDOW_DAYS = 7
 const MAX_ITEMS = 12
 
 /** 包装任务指令为生成 prompt：日期、范围约束、去重清单、严格 JSON schema。
- * `cover=true` 时追加封面图指令——用 image-studio 技能出图（效果优于裸生图），
- * 要求把工具返回的相对路径原样放进 JSON 的 cover 字段。 */
-export function buildReportPrompt(task, recentTitles = [], { cover = false } = {}) {
+ * 封面/海报不再由 agent 出图（ADR-0018：HTML 海报渲染，见 renderReportPoster），
+ * 所以 prompt 只要求结构化 JSON。 */
+export function buildReportPrompt(task, recentTitles = []) {
   const p = beijingParts(Date.now())
   const today = `今天是 ${beijingDateStr()}（周${WEEK[p.weekday]}）。`
   const lines = [
@@ -31,11 +31,8 @@ export function buildReportPrompt(task, recentTitles = [], { cover = false } = {
     lines.push('近 7 天已报道过（请勿重复选择这些旧闻）：')
     lines.push(recentTitles.slice(0, 20).map((t) => `- ${t}`).join('\n'))
   }
-  if (cover) {
-    lines.push('同时用 image-studio 技能生成一张封面图：调用 use_skill 加载 image-studio，再用 image_generate（generate 模式，size=16:9）生成现代科技感抽象封面，不要包含任何文字/字母/数字/logo。把工具返回的图片相对路径（形如 images/xxx.png）原样填入 JSON 的 cover 字段。不要调用 send_file——封面会由系统自动处理。')
-  }
   lines.push('请严格按照以下 JSON 结构输出，只输出 JSON，不要任何其他文字：')
-  lines.push('{"focus":"今日关注点一句话","cover":"images/xxx.png（封面图相对路径，无封面则为空字符串）","items":[{"title":"标题（≤60字）","summary":"一句话摘要（≤80字）","source":"来源公众号","url":"原文链接"}]}')
+  lines.push('{"focus":"今日关注点一句话","items":[{"title":"标题（≤60字）","summary":"一句话摘要（≤80字）","source":"来源公众号","url":"原文链接"}]}')
   return lines.join('\n')
 }
 
@@ -159,6 +156,58 @@ ${coverHtml}
 ${focusHtml}
 ${itemsHtml}
 <div class="foot">由微信个人助手定时生成 · 内容来源见各条目原文链接</div>
+</div></body></html>`
+}
+
+/** 微信推送的海报长图 HTML（ADR-0018：图文一体，纯 CSS 科技风头图，无 AI 图、
+ * 无裸 URL——图片没有超链接，完整版地址放在推送的短描述文本里）。
+ * 交给 poster-render 渲染成 PNG 后作为原生图片消息发送。 */
+export function renderReportPoster(report) {
+  const p = beijingParts(report.runAt)
+  const date = `${p.year}.${String(p.month).padStart(2, '0')}.${String(p.day).padStart(2, '0')}`
+  const weekday = WEEK[p.weekday]
+  const itemsHtml = report.items.map((it, i) => `
+  <div class="item"><div class="no">${String(i + 1).padStart(2, '0')}</div><div class="body"><h3>${esc(it.title)}</h3>${it.summary ? `<p>${esc(it.summary)}</p>` : ''}<span class="src">${esc(it.source)}</span></div></div>`).join('')
+  const focusHtml = report.focus ? `<div class="focus"><div class="t">今日关注</div><div class="c">${esc(report.focus)}</div></div>` : ''
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:750px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;background:#0d1020;color:#e8eaf2;-webkit-font-smoothing:antialiased}
+.wrap{padding:40px 40px 38px;background:linear-gradient(180deg,#10152e 0%,#0d1020 100%)}
+.hero{position:relative;overflow:hidden;height:340px;border-radius:26px;margin-bottom:36px;background:linear-gradient(140deg,#18204a 0%,#1c2b63 45%,#27357e 100%);box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.hero .grid{position:absolute;inset:0;background-image:repeating-linear-gradient(0deg,rgba(120,150,255,.14) 0 1px,transparent 1px 44px),repeating-linear-gradient(90deg,rgba(120,150,255,.14) 0 1px,transparent 1px 44px);mask-image:linear-gradient(180deg,rgba(0,0,0,.7),transparent 78%)}
+.hero .glow{position:absolute;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(91,120,240,.55),transparent 65%);top:-180px;right:-120px;filter:blur(6px)}
+.hero .glow2{position:absolute;width:380px;height:380px;border-radius:50%;background:radial-gradient(circle,rgba(64,214,255,.28),transparent 62%);bottom:-160px;left:-100px}
+.hero .brand{position:absolute;top:30px;left:34px;display:flex;align-items:center;gap:12px;color:#aeb8f0;font-size:19px;font-weight:700;letter-spacing:1px}
+.hero .brand .logo{width:44px;height:44px;border-radius:14px;background:linear-gradient(145deg,#5b78f0,#3350c4);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:850;color:#fff;box-shadow:0 10px 22px rgba(59,91,219,.4)}
+.hero .tag{position:absolute;right:34px;top:36px;font-size:16px;color:#7f8fd9;letter-spacing:3px;border:1px solid rgba(140,160,255,.35);padding:8px 16px;border-radius:30px}
+.hero .title{position:absolute;left:34px;bottom:64px;font-size:56px;font-weight:850;letter-spacing:4px;color:#fff;text-shadow:0 6px 30px rgba(91,120,240,.55)}
+.hero .date{position:absolute;left:36px;bottom:26px;font-size:19px;color:#93a3d8;letter-spacing:2px}
+.hero .bar{position:absolute;left:34px;bottom:-1px;width:120px;height:5px;border-radius:4px;background:linear-gradient(90deg,#5b78f0,#40d6ff)}
+.focus{background:linear-gradient(90deg,#242e5c,#2d3a72);border:1px solid #42539b;border-radius:20px;padding:24px 26px;margin-bottom:34px}
+.focus .t{font-size:20px;font-weight:800;color:#8fa4ff;letter-spacing:2px;margin-bottom:10px}
+.focus .t::before{content:"";display:inline-block;width:10px;height:10px;border-radius:3px;background:#40d6ff;margin-right:10px}
+.focus .c{font-size:22px;line-height:1.6;color:#eef1ff;font-weight:600}
+.item{display:flex;gap:22px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:26px 26px 24px;margin-bottom:20px}
+.item .no{flex:none;width:52px;height:52px;border-radius:16px;background:linear-gradient(145deg,#4a67e8,#3350c4);display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:800;color:#fff}
+.item .body{min-width:0}
+.item h3{font-size:24px;font-weight:750;line-height:1.45;color:#fff;margin-bottom:10px}
+.item p{font-size:20px;line-height:1.6;color:#b9c0dc;margin-bottom:14px}
+.item .src{display:inline-flex;align-items:center;gap:8px;font-size:17px;color:#8fa4ff;font-weight:650}
+.item .src::before{content:"";width:14px;height:14px;border-radius:50%;background:#5b78f0}
+.foot{margin-top:36px;padding-top:26px;border-top:1px solid rgba(255,255,255,.12);text-align:center}
+.foot .hint{font-size:17px;color:#7c86b3;line-height:1.5}
+</style></head><body><div class="wrap">
+  <div class="hero"><div class="grid"></div><div class="glow"></div><div class="glow2"></div>
+    <div class="brand"><span class="logo">早</span>微信个人助手 · ${esc(report.name)}</div>
+    <div class="tag">AI · 科技 · 产业</div>
+    <div class="title">${esc(report.name)}</div>
+    <div class="date">${date} · 周${weekday}</div>
+    <div class="bar"></div>
+  </div>
+  ${focusHtml}
+  ${itemsHtml}
+  <div class="foot"><span class="hint">想深入了解某条？微信里回复「第N条展开讲讲」</span></div>
 </div></body></html>`
 }
 

@@ -21,6 +21,7 @@ import { MemoryClusterer } from './llm/memory-cluster.mjs'
 import { MemoryGeneralizer } from './llm/memory-generalize.mjs'
 import { MemoryProfiler } from './llm/memory-profile.mjs'
 import { createMemoryComplete } from './llm/memory-complete.mjs'
+import { renderPoster } from './services/poster-render.mjs'
 import { buildTools } from './tools/index.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
@@ -95,12 +96,17 @@ const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
 
 // Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
-// Report tasks (DESIGN-daily-report.md): one generation + fan-out; the web URL
-// uses the public base; the cover image is produced by the agent via the
-// image-studio skill inside the report run (path lands in JSON.cover), so no
-// separate generation path is wired here.
+// Report tasks (DESIGN-daily-report.md + ADR-0018): one generation + fan-out;
+// the report is rendered into a poster long-image (HTML → PNG via headless
+// browser: system chromium/chrome/edge or @sparticuz/chromium) and pushed as
+// 图+短描述; the web URL goes in the short text. No browser → renderPoster
+// throws and the scheduler degrades to text-only (non-fatal).
 const reportUrl = (reportId) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}reports/${reportId}`
-const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, reportRoot: userFilesRoot }) : null
+const posterRender = async (report, html) => {
+  const out = path.resolve('data/reports', `${report.id}.png`)
+  return renderPoster(html, { width: 750, outPath: out })
+}
+const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender }) : null
 scheduler?.start()
 
 const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore })

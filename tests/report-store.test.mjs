@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { ReportStore, fingerprintOf, reportIdOf } from '../src/services/report-store.mjs'
 
 function setup() {
@@ -18,22 +19,49 @@ test('save/get roundtrip with items and stable per-task-day id', () => {
     const t = Date.UTC(2026, 8, 16, 0, 30)
     const a = store.saveReport({
       taskId: 'global-每日早报', name: '每日早报', runAt: t, focus: '关注AI', rawText: 'raw',
-      coverPath: '/tmp/cov.png',
+      coverPath: '/tmp/cov.png', posterPath: '/data/reports/rp-x.png',
       items: [{ title: 'Title A', summary: 'sum', source: '公众号', url: 'https://a.com' }],
     })
     assert.ok(a.id.startsWith('rp-'))
     assert.match(a.id, /-20260916$/)
     assert.equal(a.coverPath, '/tmp/cov.png')
+    assert.equal(a.posterPath, '/data/reports/rp-x.png')
     assert.equal(a.items.length, 1)
     // 同任务同一天 upsert：id 不变、内容被替换、旧 item 行清除
     const b = store.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: t, items: [{ title: 'New', summary: 's2', source: '', url: '' }] })
     assert.equal(b.id, a.id)
     assert.equal(b.items.length, 1)
     assert.equal(b.items[0].title, 'New')
+    assert.equal(b.posterPath, '') // upsert 未传 poster → 清空
     const got = store.getReport(a.id)
     assert.equal(got.items[0].title, 'New')
     assert.equal(got.focus, '') // upsert 后 focus 为空（本次未传）
     assert.equal(store.getReport('nope'), null)
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('legacy reports table without poster_path column migrates on open', () => {
+  const file = path.join(os.tmpdir(), `rp-old-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE reports (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, name TEXT NOT NULL, run_at INTEGER NOT NULL,
+      focus TEXT NOT NULL DEFAULT '', raw_text TEXT NOT NULL DEFAULT '', cover_path TEXT NOT NULL DEFAULT '',
+      items_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE report_items (
+      report_id TEXT NOT NULL, idx INTEGER NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (report_id, idx)
+    );
+  `)
+  db.close()
+  const store = new ReportStore({ file })
+  try {
+    const r = store.saveReport({ taskId: 't', name: 't', runAt: Date.now(), posterPath: '/x/y.png', items: [{ title: 'A', summary: 's' }] })
+    assert.equal(store.getReport(r.id).posterPath, '/x/y.png')
   } finally {
     store.close(); fs.rmSync(file, { force: true })
   }

@@ -28,6 +28,7 @@ export class ReportStore {
         focus       TEXT NOT NULL DEFAULT '',
         raw_text    TEXT NOT NULL DEFAULT '',
         cover_path  TEXT NOT NULL DEFAULT '',
+        poster_path TEXT NOT NULL DEFAULT '',
         items_count INTEGER NOT NULL DEFAULT 0,
         created_at  INTEGER NOT NULL DEFAULT 0
       );
@@ -42,19 +43,22 @@ export class ReportStore {
         PRIMARY KEY (report_id, idx)
       );
     `)
+    // 迁移：老库无 poster_path 列（ADR-0018 海报化）
+    const cols = this.#db.prepare('PRAGMA table_info(reports)').all().map((c) => c.name)
+    if (!cols.includes('poster_path')) this.#db.exec("ALTER TABLE reports ADD COLUMN poster_path TEXT NOT NULL DEFAULT ''")
   }
 
   /** 持久化一份报告（同一任务同一天幂等：覆盖旧内容，id 不变）。
    * @returns 已入库的完整报告（含 items）。 */
-  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', items = [] }) {
+  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', posterPath = '', items = [] }) {
     const id = reportIdOf(taskId, runAt)
     const created = Date.now()
     this.#db.prepare('DELETE FROM report_items WHERE report_id = ?').run(id)
     this.#db.prepare('DELETE FROM reports WHERE id = ?').run(id)
     this.#db.prepare(`
-      INSERT INTO reports (id, task_id, name, run_at, focus, raw_text, cover_path, items_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, String(taskId), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), items.length, Math.floor(created))
+      INSERT INTO reports (id, task_id, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, String(taskId), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), String(posterPath || ''), items.length, Math.floor(created))
     const ins = this.#db.prepare(`
       INSERT INTO report_items (report_id, idx, title, summary, source, url, fingerprint)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -77,6 +81,7 @@ export class ReportStore {
       focus: row.focus || '',
       rawText: row.raw_text || '',
       coverPath: row.cover_path || '',
+      posterPath: row.poster_path || '',
       items: itemRows.map((r) => ({ title: r.title, summary: r.summary, source: r.source, url: r.url, fingerprint: r.fingerprint })),
     }
   }

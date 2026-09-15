@@ -63,7 +63,7 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'POST' && url.pathname === '/api/profile-verifications') { const body = await readJson(req); if (!verification) return json(res, 503, { error: 'verification_not_configured' }); return json(res, 201, verification.create({ userId: assertHeader(req, 'x-user-id'), ilinkUserId: body.ilinkUserId || '' })) }
       const verifyMatch = url.pathname.match(/^\/api\/profile-verifications\/([^/]+)$/)
       if (req.method === 'GET' && verifyMatch) { if (!verification) return json(res, 503, { error: 'verification_not_configured' }); return json(res, 200, await verification.check({ userId: assertHeader(req, 'x-user-id'), id: verifyMatch[1] })) }
-      // 报告公网页（DESIGN-daily-report.md）：GET /reports/<id> 与 /reports/<id>/cover，
+      // 报告公网页（DESIGN-daily-report.md）：GET /reports/<id>、/cover、/poster，
       // 兼容反向代理子路径前缀（同 files 路由）。
       const reportCoverMatch = url.pathname.match(/^(?:\/wechat-agent)?\/reports\/([^/]+)\/cover$/)
       if (req.method === 'GET' && reportCoverMatch) {
@@ -75,6 +75,16 @@ export function createApp({ provider, agent = { async respond({ text }) { return
         const ext = path.extname(report.coverPath).toLowerCase()
         const type = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'application/octet-stream'
         res.writeHead(200, { 'content-type': type, 'content-length': data.length, 'cache-control': 'public, max-age=600' })
+        return res.end(data)
+      }
+      const reportPosterMatch = url.pathname.match(/^(?:\/wechat-agent)?\/reports\/([^/]+)\/poster$/)
+      if (req.method === 'GET' && reportPosterMatch) {
+        const id = safeDecode(reportPosterMatch[1])
+        const report = reportStore?.getReport(id)
+        if (!report?.posterPath) return json(res, 404, { error: 'poster_not_found' })
+        let data
+        try { data = await fs.readFile(report.posterPath) } catch { return json(res, 404, { error: 'poster_not_found' }) }
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': data.length, 'cache-control': 'public, max-age=600' })
         return res.end(data)
       }
       const reportMatch = url.pathname.match(/^(?:\/wechat-agent)?\/reports\/([^/]+)$/)

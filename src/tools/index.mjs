@@ -9,6 +9,7 @@ import { binaryFileTools } from './binary-file-tools.mjs'
 import { gzhTools } from './gzh-tools.mjs'
 import { manageSkillTools } from './manage-skill-tools.mjs'
 import { imageTools } from './image-tools.mjs'
+import { posterTools } from './poster-tools.mjs'
 import { taskTools } from './task-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
@@ -41,6 +42,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   const binary = binaryFileTools({ root, issueDownloadLink })
   const gzh = gzhTools()
   const image = imageTools({ root })
+  const poster = posterTools({ root })
   const tools = [
     files.readFile, files.writeFile, files.listFiles,
     code.runCode,
@@ -51,6 +53,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     send.sendFile,
     gzh.gzhSearch, gzh.gzhContent,
     image.imageGenerate,
+    poster.renderPoster,
   ]
   if (process.env.ADMIN_SKILLS === '1') {
     const manage = manageSkillTools({ skillRegistry })

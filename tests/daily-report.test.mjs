@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, normalizeFocus } from '../src/services/daily-report.mjs'
+import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, renderReportPoster, normalizeFocus } from '../src/services/daily-report.mjs'
 import { fingerprintOf } from '../src/services/report-store.mjs'
 
-test('buildReportPrompt carries task, dedup list, cover instruction and JSON schema', () => {
+test('buildReportPrompt carries task, dedup list and JSON schema (no cover instruction)', () => {
   const task = { name: '每日早报', instruction: '生成早报' }
   const p = buildReportPrompt(task, ['旧闻1', '旧闻2'])
   assert.match(p, /【定时任务「每日早报」】/)
@@ -12,13 +12,10 @@ test('buildReportPrompt carries task, dedup list, cover instruction and JSON sch
   assert.match(p, /近 7 天已报道/)
   assert.match(p, /"items"/)
   assert.match(p, /只输出 JSON/)
-  // cover 指令仅在 cover=true 时出现
+  // ADR-0018：海报由 HTML 渲染，prompt 不再要求 agent 出封面图
   assert.doesNotMatch(p, /image-studio/)
-  const pc = buildReportPrompt(task, [], { cover: true })
-  assert.match(pc, /image-studio/)
-  assert.match(pc, /image_generate/)
-  assert.match(pc, /16:9/)
-  assert.match(pc, /"cover"/)
+  assert.doesNotMatch(p, /cover/)
+  assert.doesNotMatch(p, /image_generate/)
 })
 
 test('parseReportJson handles plain, fenced, wrapped and invalid inputs', () => {
@@ -113,4 +110,30 @@ test('renderReportPage is responsive HTML with escaped content', () => {
   // 无封面时不出 <img class="cover">
   const html2 = renderReportPage({ ...report, coverPath: '' })
   assert.doesNotMatch(html2, /<img class="cover"/)
+})
+
+test('renderReportPoster is a text-on-image poster with no raw URLs and no AI image', () => {
+  const report = {
+    id: 'rp-x', name: '每日早报', runAt: Date.UTC(2026, 8, 15, 0, 30), focus: '关注点X',
+    items: [
+      { title: '<b>T1</b>', summary: 'S1', source: '公众号A', url: 'https://a.com' },
+      { title: 'T2', summary: 'S2', source: '公众号B', url: 'https://b.com' },
+    ],
+  }
+  const html = renderReportPoster(report)
+  assert.match(html, /width:750px/)
+  assert.match(html, /每日早报/)
+  assert.match(html, /2026\.09\.15/)
+  assert.match(html, /公众号A/)
+  assert.match(html, /关注点X/)
+  // 图片没有超链接：海报不出现裸 URL、不出现「完整版」地址提示（地址只在推送短描述里）
+  assert.ok(!html.includes('https://a.com'))
+  assert.ok(!html.includes('https://b.com'))
+  assert.ok(!html.includes('完整版'))
+  // 纯 CSS 科技风头图：无 <img>、无外部图片
+  assert.doesNotMatch(html, /<img/)
+  // 内容转义，防注入/排版破坏
+  assert.ok(!html.includes('<b>T1</b>'))
+  assert.match(html, /&lt;b&gt;T1&lt;\/b&gt;/)
+  assert.match(html, /第N条展开讲讲/)
 })

@@ -138,7 +138,7 @@ const REPORT_JSON = JSON.stringify({
   ],
 })
 
-function setupReport({ agent, subscribers = {}, cover = false, reportRoot = null, provider = null } = {}) {
+function setupReport({ agent, subscribers = {}, posterRender = null, provider = null } = {}) {
   const file = path.join(os.tmpdir(), `sch-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
   const store = new TaskStore({ file })
   const reportStore = new ReportStore({ file: file + '.rep.db' })
@@ -151,14 +151,14 @@ function setupReport({ agent, subscribers = {}, cover = false, reportRoot = null
   const profileStore = { get: async (id) => profiles.get(id) || null }
   const tokens = new ContextTokenCache({ file: file + '.ctx.json', flushDelayMs: 60000 })
   for (const [uid, tok] of Object.entries(subscribers)) tokens.update(uid, { contextToken: tok, providerBotId: 'bot-1' })
-  const root = reportRoot || path.join(os.tmpdir(), `sch-root-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  const scheduler = new TaskScheduler({ taskStore: store, agent, provider: realProvider, profileStore, contextTokens: tokens, now: () => NOW, reportStore, reportUrl: (id) => `https://reports.local/${id}`, reportRoot: root })
-  store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: '生成早报', kind: 'report', cover, createdAt: CREATED }])
+  const root = path.join(os.tmpdir(), `sch-root-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const scheduler = new TaskScheduler({ taskStore: store, agent, provider: realProvider, profileStore, contextTokens: tokens, now: () => NOW, reportStore, reportUrl: (id) => `https://reports.local/${id}`, posterRender })
+  store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: '生成早报', kind: 'report', createdAt: CREATED }])
   for (const uid of Object.keys(subscribers)) store.subscribe('每日早报', uid) // 订阅者真正入订阅列表
   return { file, root, store, reportStore, scheduler, sent, sentImgs, profiles }
 }
 
-test('report-kind global task runs the agent once and fans the same digest out', async () => {
+test('report-kind global task runs the agent once and fans the same short text out', async () => {
   const calls = []
   const agent = { respond: async (args) => { calls.push(args); return { text: REPORT_JSON } } }
   const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1', u2: 'tok-2', u3: 'tok-3' } })
@@ -168,10 +168,11 @@ test('report-kind global task runs the agent once and fans the same digest out',
     assert.equal(calls.length, 1) // 生成只跑一次，不随订阅者数翻倍
     assert.equal(sent.length, 3)
     for (const m of sent) {
-      assert.match(m.text, /标题A/)
-      assert.match(m.text, /https:\/\/reports\.local\/rp-/) // 公网 URL
-      assert.match(m.text, /用户u\d/)
-      assert.match(m.text, /关注AI新进展/)
+      assert.match(m.text, /已送达/)
+      assert.match(m.text, /https:\/\/reports\.local\/rp-/) // 公网 URL 在短描述里
+      assert.match(m.text, /第N条展开讲讲/)
+      assert.doesNotMatch(m.text, /标题A/) // 内容在海报里，不在文本里
+      assert.doesNotMatch(m.text, /https:\/\/a\.com/) // 不裸奔 URL
     }
     const t = store.getTask('global-每日早报')
     assert.ok(t.lastRunAt > 0)
@@ -218,37 +219,37 @@ test('unparsable report degrades to raw text push and records report_unparsable'
   }
 })
 
-test('cover image from agent JSON is sent before text; missing file degrades to text-only', async () => {
-  // 场景 1：cover 文件真实存在 → sendImage 先于 sendText
-  const coverRel = 'images/cov.png'
-  const agent1 = { respond: async () => ({ text: JSON.stringify({ focus: '', cover: coverRel, items: [{ title: 'A', summary: 's', source: 'x', url: 'https://a' }, { title: 'B', summary: 's2', source: 'y', url: 'https://b' }, { title: 'C', summary: 's3', source: 'z', url: 'https://c' }] }) }) }
+test('poster image is sent before the short text; poster failure degrades to text-only', async () => {
+  const agentOk = { respond: async () => ({ text: REPORT_JSON }) }
+  // 场景 1：posterRender 产出真实文件 → sendImage 先于 sendText，posterPath 入库
+  const posterFile = path.join(os.tmpdir(), `poster-${Date.now()}-${Math.random().toString(36).slice(2)}.png`)
+  fs.writeFileSync(posterFile, Buffer.from([137, 80, 78, 71]))
   const sentImgs1 = []
   const sent1 = []
   const s1 = setupReport({
-    agent: agent1, subscribers: { u1: 'tok-1' }, cover: true,
+    agent: agentOk, subscribers: { u1: 'tok-1' },
+    posterRender: async () => posterFile,
     provider: { sendImage: async (a) => { sentImgs1.push(a); return {} }, sendText: async (a) => { sent1.push(a); return {} } },
   })
   try {
-    const coverAbs = path.join(s1.root, 'task-global-每日早报', coverRel)
-    fs.mkdirSync(path.dirname(coverAbs), { recursive: true })
-    fs.writeFileSync(coverAbs, Buffer.from([1, 2, 3]))
     s1.profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
     await s1.scheduler.sweep()
     assert.equal(sentImgs1.length, 1)
-    assert.equal(sentImgs1[0].fileName, 'cov.png')
+    assert.equal(sentImgs1[0].fileName, path.basename(posterFile))
     assert.equal(sent1.length, 1)
+    assert.match(sent1[0].text, /已送达/)
     const rep = s1.reportStore.listReports('global-每日早报', 1)
-    assert.equal(s1.reportStore.getReport(rep[0].id).coverPath, path.join(s1.root, 'task-global-每日早报', coverRel))
+    assert.equal(s1.reportStore.getReport(rep[0].id).posterPath, posterFile)
   } finally {
-    s1.store?.close?.(); s1.reportStore?.close?.(); fs.rmSync(s1.file, { force: true }); fs.rmSync(s1.file + '.rep.db', { force: true }); fs.rmSync(s1.root, { recursive: true, force: true })
+    s1.store?.close?.(); s1.reportStore?.close?.(); fs.rmSync(s1.file, { force: true }); fs.rmSync(s1.file + '.rep.db', { force: true }); fs.rmSync(s1.root, { recursive: true, force: true }); fs.rmSync(posterFile, { force: true })
   }
 
-  // 场景 2：cover 路径指向不存在的文件 → 纯文字，无 sendImage、无报错
-  const agent2 = { respond: async () => ({ text: JSON.stringify({ focus: '', cover: 'images/ghost.png', items: [{ title: 'A', summary: 's', source: 'x', url: 'https://a' }, { title: 'B', summary: 's2', source: 'y', url: 'https://b' }, { title: 'C', summary: 's3', source: 'z', url: 'https://c' }] }) }) }
+  // 场景 2：posterRender 抛错 → 任务不失败，纯文本推送，无 sendImage
   const sentImgs2 = []
   const sent2 = []
   const s2 = setupReport({
-    agent: agent2, subscribers: { u1: 'tok-1' }, cover: true,
+    agent: agentOk, subscribers: { u1: 'tok-1' },
+    posterRender: async () => { throw new Error('no browser') },
     provider: { sendImage: async (a) => { sentImgs2.push(a); return {} }, sendText: async (a) => { sent2.push(a); return {} } },
   })
   try {
@@ -256,10 +257,29 @@ test('cover image from agent JSON is sent before text; missing file degrades to 
     await s2.scheduler.sweep()
     assert.equal(sentImgs2.length, 0)
     assert.equal(sent2.length, 1)
-    assert.match(sent2[0].text, /1\. A\n　s（x｜https:\/\/a）/)
-    const rep = s2.reportStore.listReports('global-每日早报', 1)
-    assert.equal(s2.reportStore.getReport(rep[0].id).coverPath, '')
+    assert.match(sent2[0].text, /已送达/)
+    const t = s2.store.getTask('global-每日早报')
+    assert.equal(t.lastError, '') // 海报失败不污染任务错误（内容本身成功）
   } finally {
     s2.store?.close?.(); s2.reportStore?.close?.(); fs.rmSync(s2.file, { force: true }); fs.rmSync(s2.file + '.rep.db', { force: true }); fs.rmSync(s2.root, { recursive: true, force: true })
+  }
+
+  // 场景 3：poster 文件缺失 → 无 sendImage，仍有短文本
+  const ghostFile = path.join(os.tmpdir(), `ghost-${Date.now()}.png`)
+  const sentImgs3 = []
+  const sent3 = []
+  const s3 = setupReport({
+    agent: agentOk, subscribers: { u1: 'tok-1' },
+    posterRender: async () => ghostFile,
+    provider: { sendImage: async (a) => { sentImgs3.push(a); return {} }, sendText: async (a) => { sent3.push(a); return {} } },
+  })
+  try {
+    s3.profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await s3.scheduler.sweep()
+    assert.equal(sentImgs3.length, 0)
+    assert.equal(sent3.length, 1)
+    assert.match(sent3[0].text, /https:\/\/reports\.local\/rp-/)
+  } finally {
+    s3.store?.close?.(); s3.reportStore?.close?.(); fs.rmSync(s3.file, { force: true }); fs.rmSync(s3.file + '.rep.db', { force: true }); fs.rmSync(s3.root, { recursive: true, force: true })
   }
 })
