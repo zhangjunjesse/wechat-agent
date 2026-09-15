@@ -48,6 +48,14 @@ export class TaskStore {
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, task_name)
       );
+      CREATE TABLE IF NOT EXISTS guide_events (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    TEXT NOT NULL,
+        event      TEXT NOT NULL,
+        entry      TEXT NOT NULL DEFAULT '',
+        task_name  TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      );
     `)
   }
 
@@ -168,6 +176,50 @@ export class TaskStore {
   listReportTopics(userId) {
     const rows = this.#db.prepare('SELECT task_name, topics FROM report_topics WHERE user_id = ?').all(String(userId))
     return rows.map((r) => ({ taskName: r.task_name, topics: safeJson(r.topics, []) }))
+  }
+
+  // ---- 引导效果度量（ADR-0020：guide_events 埋点）----
+
+  /** 记录一次引导曝光/转化事件。
+   * event: 'guide_shown'（引导展示）| 'guide_converted'（用户据此设置了主题）
+   * entry: 'subscribe'（订阅回执）| 'push'（海报/短描述推送）| 'chat'（对话中设置主题） */
+  recordGuideEvent({ userId, event, entry = '', taskName = '' }) {
+    if (!userId) return
+    this.#db.prepare('INSERT INTO guide_events (user_id, event, entry, task_name, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(String(userId), String(event), String(entry), String(taskName || ''), Date.now())
+  }
+
+  /** 引导效果统计：漏斗 + 入口分布 + 平均转化耗时（毫秒）。
+   * 返回 { subscribed, shown, converted, byEntry, convertHours } */
+  guideStats() {
+    const subRows = this.#db.prepare("SELECT subscribers FROM tasks WHERE scope = 'global'").all()
+    const subscribed = new Set()
+    for (const r of subRows) for (const u of safeJson(r.subscribers, [])) subscribed.add(String(u))
+    const shownRows = this.#db.prepare("SELECT user_id, entry, created_at FROM guide_events WHERE event = 'guide_shown'").all()
+    const convRows = this.#db.prepare("SELECT user_id, created_at FROM guide_events WHERE event = 'guide_converted'").all()
+    const shownUsers = new Set(shownRows.map((r) => String(r.user_id)))
+    const byEntry = {}
+    for (const r of shownRows) byEntry[r.entry] = (byEntry[r.entry] || 0) + 1
+    // 转化耗时：同用户最近一次 shown 到第一次 converted 的间隔
+    const convertMs = []
+    const firstConvByUser = new Map()
+    for (const r of convRows) {
+      if (!firstConvByUser.has(String(r.user_id))) firstConvByUser.set(String(r.user_id), Number(r.created_at))
+    }
+    const lastShownByUser = new Map()
+    for (const r of shownRows) lastShownByUser.set(String(r.user_id), Number(r.created_at))
+    for (const [u, convAt] of firstConvByUser) {
+      const shownAt = lastShownByUser.get(u)
+      if (shownAt && convAt >= shownAt) convertMs.push(convAt - shownAt)
+    }
+    const avgMs = convertMs.length ? Math.round(convertMs.reduce((a, b) => a + b, 0) / convertMs.length) : null
+    return {
+      subscribed: subscribed.size,
+      shown: shownUsers.size,
+      converted: firstConvByUser.size,
+      byEntry,
+      convertHours: avgMs == null ? null : Math.round((avgMs / 3600_000) * 10) / 10,
+    }
   }
 
   // ---- shared ----

@@ -92,6 +92,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       const userId = ctx?.context?.userId
       try {
         taskStore.subscribe(input.name, userId)
+        taskStore.recordGuideEvent({ userId, event: 'guide_shown', entry: 'subscribe', taskName: input.name })
         return `已订阅公共任务「${input.name}」，到点会推送到你的微信。\n想让它更贴合你？告诉我感兴趣的主题，比如「订阅 AI 主题」，日报就会围绕你关注的方向生成。`
       } catch (e) {
         return `订阅失败：${e.message}`
@@ -193,6 +194,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       const userId = ctx?.context?.userId
       try {
         const topics = taskStore.setReportTopics({ globalName: input.name, userId, topics: input.topics || [] })
+        taskStore.recordGuideEvent({ userId, event: 'guide_converted', entry: 'chat', taskName: input.name })
         return topics.length
           ? `已设置「${input.name}」的个性化主题：${topics.join('、')}。从下次推送起，日报会围绕这些主题生成（只对你生效）。随时可改：告诉我新的主题即可。`
           : `已清除「${input.name}」的个性化主题，回到公共版日报。`

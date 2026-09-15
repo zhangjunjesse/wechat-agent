@@ -143,3 +143,27 @@ test('report topics are per-user isolated and require subscription', () => {
     store?.close?.(); fs.rmSync(file, { force: true })
   }
 })
+
+test('guide events record shown/converted and stats aggregate the funnel', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'u2')
+    // 曝光：订阅回执 + 推送（u1 两次、u2 一次）
+    store.recordGuideEvent({ userId: 'u1', event: 'guide_shown', entry: 'subscribe', taskName: '每日早报' })
+    store.recordGuideEvent({ userId: 'u1', event: 'guide_shown', entry: 'push', taskName: '每日早报' })
+    store.recordGuideEvent({ userId: 'u2', event: 'guide_shown', entry: 'push', taskName: '每日早报' })
+    // 转化：u1 设主题（对话入口）
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
+    store.recordGuideEvent({ userId: 'u1', event: 'guide_converted', entry: 'chat', taskName: '每日早报' })
+    const s = store.guideStats()
+    assert.equal(s.subscribed, 2)
+    assert.equal(s.shown, 2) // 2 个用户收到过引导
+    assert.equal(s.converted, 1)
+    assert.deepEqual(s.byEntry, { subscribe: 1, push: 2 })
+    assert.ok(s.convertHours != null && s.convertHours >= 0)
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})

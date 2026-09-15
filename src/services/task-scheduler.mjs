@@ -199,6 +199,8 @@ export class TaskScheduler {
         }
       }
       await this.#provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken, text })
+      // 引导曝光埋点（ADR-0020）：海报/短描述带主题定制引导，记录展示
+      this.#taskStore.recordGuideEvent({ userId, event: 'guide_shown', entry: 'push', taskName: task.name })
       return { userId, sent: true }
     } catch (error) {
       return { userId, error: error.message || String(error) }

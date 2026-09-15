@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **278/278 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **279/279 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -167,6 +167,9 @@
   到点生成 = 公共版一次（无主题订阅者共享）+ 每个有主题用户**单独生成**贴合自己主题
   的日报（prompt 注入主题、报告/去重按用户维度隔离、海报标题带主题徽标、公网链接独立）。
   主动引导三入口：订阅回执提示、海报底部引导行、推送短描述。
+- **引导效果度量（ADR-0020）**：`guide_events` 埋点（曝光 `guide_shown`：subscribe/push；
+  转化 `guide_converted`：chat）+ `scripts/guide-stats.mjs` 统计脚本（漏斗/入口分布/
+  平均转化耗时/7 天趋势；生产 `TASKS_FILE=/data/tasks.db node scripts/guide-stats.mjs`）。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线
