@@ -432,10 +432,24 @@ new MemoryMaintenance({
 步骤：
   1. 全量重算 importance（时间衰减刷新）
   2. 归档候选 → archive(reason='low_importance')
-  3. 聚类压缩 → mergeInto(...)
-  4. 抽象泛化 → insert(kind='generalized') [+ 必要时归档来源]
+  3. **抽象泛化** → insert(kind='generalized') [+ 必要时归档来源]   ← 必须在聚类之前
+  4. 聚类压缩 → mergeInto(...)
   5. 档案重建 → upsertProfile(...)
-  6. 写 memory_maintenance.last_run_at / last_result（归档/合并/泛化计数）
+  6. 写 memory_maintenance.last_run_at / last_result（计数 + 明细，见下）
+
+> ⚠️ **顺序修正（2026-09-15 真实验证发现）**：原设计是「聚类 → 泛化」，但两层吃的是
+> **同一批原料**——同 (category, subject) 的相似事件。先聚类会把 3 条同类 episodic 合并成
+> 1 条，泛化再也凑不齐「≥3 条样本」门槛，**第三层被第二层饿死**（线上副本实测
+> `generalized=0`；调整为泛化先行后同一数据 `generalized=1`）。两层的分工因此更清晰：
+> 泛化提炼规律（保留或归档来源）、聚类合并冗余细节。
+
+**维护日志（A3 补强）**：`last_result` 存 JSON——`summary` 人读摘要 + `snapshotSize`/`drift` +
+`archived`/`merged`/`generalized` 各前 3 条明细 + `skipped` 原因 + `errors`，
+出问题能从日志回溯「具体动了哪几条」，而不只是计数。
+
+**档案漂移检测（A1 补强）**：`isDue()` 除时间维度外，还比较 `profile.sourceCount` 与当前
+active 卡片数（口径同 profiler，排除助手命名卡）；差值 ≥ `MEMORY_PROFILE_DRIFT`(8) 即提前
+触发重建（带 1h 冷却，避免连续对话时反复触发）。
 失败处理：任一用户任一步骤抛错 → 记入 last_result，不中断 tick 其余部分。
 串行执行：#running 标志保证同一时刻只跑一个用户的重量维护（避免 LLM 并发打爆配额）。
 ```
