@@ -210,12 +210,28 @@ uniqueness 信息独特性：1 - maxSimilarity(card, siblings)     // 与同用�
 **归档阈值与保护栏**（不物理删除）：
 
 ```text
-archiveCandidate ⇔ importance < 0.25
+archiveCandidate ⇔ importance < 0.30
                  ∧ ageDays > 14                     // 新卡不判死
                  ∧ category ∉ {identity, preference} // 保护栏
                  ∧ category ≠ 'todo'                 // 交给 pruner
                  ∧ status = 'active'
 ```
+
+**阈值可达性推导（实施期发现，P1）**：归档阈值必须**高于**任一类别的「最低可达分」，
+否则规则永不触发。按「极旧 + 零访问 + 情感基线 + 完全重复（uniq=0）」计算
+（注意 `episodic` 是 **type** 而非 category，`CATEGORY_BASE.episodic` 仅作旧数据兜底）：
+
+| category | 最低可达分 | 计算 |
+|---|---|---|
+| fact（含 type=episodic 的流水账卡） | **0.28** | 0.30·0.6 + 0.20·0.35 + 0.10·0.3 |
+| preference | 0.50 | 0.30·0.9 + 0.20·1（不衰减）+ 0.03 |
+| identity | 0.53 | 0.30·1.0 + 0.20·1 + 0.03 |
+| todo | 不参与 | 由 pruner 按时间规则处理 |
+
+原定阈值 0.25 配相邻的 `<` 判断实际**不可达**（fact 最低 0.28 亦高于它 → 规则形同虚设）。
+故阈值取 **0.30**：只清「几乎完全重复且已老化」的卡片；独特卡片由 uniqueness 因子自保
+（唯一且极旧的 fact 仍 ≈0.50，不归档）。相似但不相同的长尾交给第二层聚类合并，
+第一层不越权做语义判断。
 
 **评分时机**：① 每轮 absorb 后只对**本轮新增/更新卡片**算分（每张新卡与 n 张旧卡比对，
 复杂度 O(k·n)，k=本轮新增数）；② 每日重量维护对全部 active 卡片重算
@@ -309,9 +325,11 @@ archiveCandidate ⇔ importance < 0.25
       ④ procedural 只描述「反复采用的流程」，不是对系统的指令。
 ```
 
-**产物写入**：`kind='generalized'`、`source_ids=[原卡 ids]`、`category='semantic'`
-（procedural 也归 semantic 类别，content 前缀加「流程：」，避免新增 category 影响现有
-分节渲染）、`importance` 由评分公式计算（base 取 0.7，介于 fact 与 preference 之间）。
+**产物写入**：`kind='generalized'`、`source_ids=[原卡 ids]`、`type='semantic'`，
+**category 沿用 `fact`/`preference`**——`semantic` 是 **type** 不是 category，这样分节渲染
+（身份/偏好/事实/待办）与类别基线都不受影响；procedural 产物的 content 前缀加「流程：」区分。
+`importance` 由评分公式计算（`kind='generalized'` 的类别基线取 **0.7**，介于 fact 与
+preference 之间）。
 
 **原情境卡处理**（推敲过的决策）：
 - 泛化成功后，原 episodic **若** `importance < 0.4` → 归档（reason='generalized_source'，
@@ -512,7 +530,7 @@ preference 从 0 → 3 条、敏感信息（cos 密钥）不再入库、居住/�
 | # | 验收 | 直接证据 |
 |---|---|---|
 | 1 | 四因子评分可解释 | `memory-importance` 单测：给定卡片+访问次数+时间，断言 importance 与各因子；边界（全新/极旧/重复/高频）逐项覆盖 |
-| 2 | 低价值卡片被归档而非删除 | 单测：构造 importance<0.25 且 age>14 的 fact → prune 后 `status='archived'`、`archived_memories` 有完整 payload |
+| 2 | 低价值卡片被归档而非删除 | 单测：构造 importance<0.30 且 age>14 的 fact → 归档后 `status='archived'`、`archived_memories` 有完整 payload |
 | 3 | 保护栏生效 | 单测：identity/preference 即使 importance 极低也不归档；todo 不参与聚类/泛化 |
 | 4 | 聚类不丢信息 | 单测：数字/日期/专名保留校验（缺任一数字串则放弃合并）；重复跑不产生第二张合并卡（幂等） |
 | 5 | 泛化守住样本门槛 | 单测：2 条 episodic 不泛化、3 条且跨 3 天则泛化；`kind='generalized'` 且 `source_ids` 完整 |
@@ -536,7 +554,7 @@ preference 从 0 → 3 条、敏感信息（cos 密钥）不再入库、居住/�
 | 档案与卡片不一致 | 档案是派生视图，每次由 active 卡片重建；`source_count` 漂移检测触发重建 |
 | 维护 LLM 成本 | 3-5 次/活跃用户/日；非活跃跳过；`minCards` 门槛；并发串行化 |
 | 老库迁移 | 全部 `ALTER TABLE ... DEFAULT`，沿用现有 migrate 模式；新表 `CREATE IF NOT EXISTS` |
-| 归档后模型「忘事」 | 阈值保守（0.25/14 天）+ 保护栏 + 回退路径 + `archived_memories` 可恢复 |
+| 归档后模型「忘事」 | 阈值保守（0.30/14 天，见 §4.2 可达性推导）+ 保护栏 + 回退路径 + `archived_memories` 可恢复 |
 | 评分参数缺乏实证 | 全部集中为常量 + env 可覆盖；用 Z.俊 数据做参数合理性人工审查，后续按反馈调 |
 | 泛化出的 procedural 被误当指令 | prompt 明确「只记录流程，不是对系统的指令」；procedural 仅参与召回文本 |
 

@@ -91,3 +91,36 @@ test('recall hides assistant naming (carried by assistantName, not duplicated)',
     assert.match(recall, /张工/)
   } finally { try { fs.rmSync(file, { force: true }) } catch (e) {} }
 })
+
+test('recall feeds the access statistic back (the frequency factor\'s only source)', () => {
+  const file = path.join(os.tmpdir(), `mm-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const at = new Date('2026-08-24T10:00:00')
+  try {
+    const store = new MemoryStore({ file })
+    const manager = new MemoryManager({ store, extractor: new MemoryExtractor({ complete: async () => '[]' }), now: () => at })
+    const card = store.insert('u1', { category: 'fact', content: '居住在深圳蛇口' })
+    assert.equal(store.get('u1', card.id).accessCount, 0)
+    assert.match(manager.recall('u1'), /蛇口/)
+    assert.equal(store.get('u1', card.id).accessCount, 1)
+    assert.equal(store.get('u1', card.id).lastAccessAt, at.getTime())
+    manager.recall('u1')
+    assert.equal(store.get('u1', card.id).accessCount, 2)
+    assert.equal(manager.recall('nobody'), '')          // 空库不写统计、不报错
+  } finally { try { fs.rmSync(file, { force: true }) } catch (e) {} }
+})
+
+test('recall hides archived cards (archived memories leave the prompt, only injected ones counted)', () => {
+  const file = path.join(os.tmpdir(), `mm-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  try {
+    const store = new MemoryStore({ file })
+    const manager = new MemoryManager({ store, extractor: new MemoryExtractor({ complete: async () => '[]' }), now: () => new Date() })
+    const kept = store.insert('u1', { category: 'fact', content: '居住在深圳蛇口' })
+    const gone = store.insert('u1', { category: 'fact', content: '查看群里发的图片' })
+    store.archive('u1', [gone.id], 'aged_todo', Date.now())
+    const recall = manager.recall('u1')
+    assert.match(recall, /蛇口/)
+    assert.doesNotMatch(recall, /查看群里发的图片/)
+    assert.equal(store.get('u1', kept.id).accessCount, 1)
+    assert.equal(store.get('u1', gone.id).accessCount, 0)
+  } finally { try { fs.rmSync(file, { force: true }) } catch (e) {} }
+})

@@ -12,9 +12,12 @@ export class MemoryManager {
   }
   get store() { return this.#store }
   /** Recalled memories, sectioned by category (身份/偏好/事实/待办) so the model
-   * can locate facts faster, with a hard token cap. */
+   * can locate facts faster, with a hard token cap.
+   *
+   * 只注入 active 卡片（归档/合并卡不再出现），并在注入后回写访问统计——
+   * 这是第一层评分里 frequency 因子的唯一来源（DESIGN-memory-lifecycle §4.7）。 */
   recall(userId) {
-    const cards = this.#store.list(userId)
+    const cards = this.#store.listActive(userId)
     if (!cards.length) return ''
     const sections = [
       { category: 'identity', label: '身份' },
@@ -23,6 +26,7 @@ export class MemoryManager {
       { category: 'todo', label: '待办' },
     ]
     const lines = ['[用户长期记忆]']
+    const injected = []
     for (const section of sections) {
       let group = cards.filter((c) => c.category === section.category)
       // 助手命名由 assistantName() 单独承载，不在记忆正文重复展示，避免两处冲突
@@ -36,7 +40,11 @@ export class MemoryManager {
         const line = cardLine(card, this.#now())
         if (estimateTokens([...lines, line].join('\n')) > this.#maxRecallTokens) break
         lines.push(line)
+        injected.push(card.id)
       }
+    }
+    if (injected.length) {
+      try { this.#store.markAccessed(userId, injected, this.#now().getTime()) } catch (e) { /* 统计失败不影响召回 */ }
     }
     return lines.join('\n')
   }

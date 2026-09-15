@@ -36,9 +36,21 @@
   - `memory-pruner`：todo 过期（due 超期 >7 天）与老化（无 due 且 >15 天未更新）→ **归档**
     （不物理删除，可回滚）；identity/preference/fact 永不自动清理。
   - `delete_todo` 工具：用户显式删除 → 物理删除（隐私优先），与 pruner 的归档语义区分。
-- **踩坑记录**：老库迁移时 `idx_memories_active`（引用 `status` 新列）必须在补列之后再建，
-  否则 `CREATE TABLE IF NOT EXISTS` 阶段直接 `no such column: status` 启动失败。
-- **待办**：P1 `memory-importance` 评分 → P2 `memory-cluster` → P3 `memory-generalize`
+- **P1 已完成**（208/208 全绿）：
+  - `memory-importance`：**四因子评分**——类别基线（identity 1.0/preference 0.9/todo 0.8/
+    fact 0.6）+ 访问频率（5 次饱和）+ 时间衰减（**按类别分半衰期**：identity/preference 不衰减、
+    fact 180 天、episodic 45 天，加 `DECAY_FLOOR=0.35`）+ 情感强度（缺失按 0.3 中性基线）+
+    信息独特性（3-gram Jaccard，按码点切分）；归档路径 `archiveLowImportance`（保护栏 +
+    14 天最小年龄 + 归档可回滚）。
+  - **重要修正**：归档阈值由 0.25 改为 **0.30**——可达性推导发现 fact 的最低可达分是 0.28，
+    原阈值配 `<` 判断**永不触发**（首层形同虚设）。推导表见 DESIGN §4.2。
+  - recall：只注入 active 卡（归档/合并卡不再出现）+ **回写访问统计**（frequency 因子的唯一来源）。
+- **踩坑记录**：
+  1. 老库迁移时 `idx_memories_active`（引用 `status` 新列）必须在补列之后再建，
+     否则 `CREATE TABLE IF NOT EXISTS` 阶段直接 `no such column: status` 启动失败。
+  2. 评分阈值/权重必须做「可达性推导」，否则规则静默失效（已加参数回归守卫测试）。
+  3. 测试涉及时间的用例一律以 `Date.now()` 为基准做相对偏移，硬编码日期会在 7/15 天边界假失败。
+- **待办**：P2 `memory-cluster`（规则预聚 + LLM 合并 + 数字/专名校验）→ P3 `memory-generalize`
   → P4 `memory-profile` + recall 分层 → P5 `memory-maintenance` 编排 + server 接线 +
   Z.俊 真实数据端到端回放 + ADR-0016 收敛。
 
