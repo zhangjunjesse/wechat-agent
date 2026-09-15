@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { createProgressNotifier } from './progress-notifier.mjs'
 
 /** 群命令监听器（群聊入口：收走 wechat-sync，发走 iLink 私聊）。
  *
@@ -28,10 +29,11 @@ export class GroupCommandWatcher {
   #seen = new Set()
   #intervalMs
   #onError
+  #progress
   #timer = null
   #running = false
 
-  constructor({ dbFile, agent, provider, profileStore, contextTokens, cursorFile = 'data/group-watcher-cursor.json', intervalMs = 5000, onError = null, initialCursor = null }) {
+  constructor({ dbFile, agent, provider, profileStore, contextTokens, cursorFile = 'data/group-watcher-cursor.json', intervalMs = 5000, onError = null, initialCursor = null, progress = {} }) {
     this.#db = new DatabaseSync(dbFile, { readOnly: true })
     this.#agent = agent
     this.#provider = provider
@@ -40,6 +42,7 @@ export class GroupCommandWatcher {
     this.#cursorFile = cursorFile
     this.#intervalMs = intervalMs
     this.#onError = onError
+    this.#progress = progress
     try {
       const saved = JSON.parse(fs.readFileSync(cursorFile, 'utf8'))
       this.#cursor = Number(saved?.ts || 0)
@@ -137,24 +140,24 @@ export class GroupCommandWatcher {
       `如需更多上下文，可用 wechat_search_chat 查询群「${chatName}」最近的聊天记录（**控制条数，默认 ≤20 条**）；引用内容若是飞书链接用 lark_read_doc 读取；若是文件/图片，如实说明能做什么。回答能力类问题要简洁，不要一次性拉取全部消息。`,
     ].filter(Boolean).join('\n')
 
-    // 5) 秒回确认（体验：大任务不让用户干等）+ agent 处理 + 超时提示
+    // 5) 长任务体验：统一进度反馈器（8s 未完成 ack + 40s 心跳）+ agent 处理 + 结果
     const push = (msg) => this.#provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken, text: msg })
-    await push('✅ 收到你的指令，正在处理，请稍候（内容较多时可能需要一两分钟）。处理完我会私聊推送结果。')
-    const respondPromise = this.#agent.respond({
-      userId,
-      text,
-      profile,
-      channel: { type: 'ilink', providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken },
-    })
-    // 90s 未完成先推一条"还在处理"，随后继续等原任务（不重复调 agent）
-    let slowTimer = null
-    const timeout = new Promise((res) => { slowTimer = setTimeout(() => res({ slow: true }), 90_000); slowTimer.unref?.() })
-    const first = await Promise.race([respondPromise.then((r) => ({ slow: false, r })), timeout])
-    if (first?.slow) {
-      await push('⏳ 任务还在处理中（内容较多），请再稍等片刻…')
+    const notifier = createProgressNotifier({ provider: this.#provider, channel: { providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken }, ...this.#progress })
+    notifier.start()
+    let reply
+    try {
+      reply = await this.#agent.respond({
+        userId,
+        text,
+        profile,
+        channel: { type: 'ilink', providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken },
+      })
+    } catch (error) {
+      notifier.stop()
+      await push(`⚠️ 处理出错了：${error?.message || error}\n可以再试一次；如果反复失败，请把这条错误发我。`)
+      throw error
     }
-    clearTimeout(slowTimer)
-    const reply = await respondPromise
+    notifier.stop()
     const out = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
     if (out) await push(out)
   }

@@ -22,12 +22,18 @@ function makeDb(rows) {
   return file
 }
 
-function setup({ rows, profiles = [{ userId: 'u1', nickname: 'Z.俊', wxid: 'wx_zj', ilinkUserId: 'ilink_zj' }] } = {}) {
+function setup({ rows, profiles = [{ userId: 'u1', nickname: 'Z.俊', wxid: 'wx_zj', ilinkUserId: 'ilink_zj' }], agentDelay = 0 } = {}) {
   const dbFile = makeDb(rows)
   const cursorFile = path.join(os.tmpdir(), `gcmd-cur-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
   const calls = []
   const sent = []
-  const agent = { respond: async (args) => { calls.push(args); return { text: `已处理：${(args.text.match(/指令：(.+)/) || [])[1] || ''}` } } }
+  const agent = {
+    respond: async (args) => {
+      calls.push(args)
+      if (agentDelay) await new Promise((r) => setTimeout(r, agentDelay))
+      return { text: `已处理：${(args.text.match(/指令：(.+)/) || [])[1] || ''}` }
+    },
+  }
   const provider = { sendText: async (a) => { sent.push(a); return {} } }
   const profileStore = {
     list: async () => profiles,
@@ -36,7 +42,7 @@ function setup({ rows, profiles = [{ userId: 'u1', nickname: 'Z.俊', wxid: 'wx_
   const contextTokens = {
     get: (ilinkId) => (ilinkId === 'ilink_zj' ? { contextToken: 'tok-zj', providerBotId: 'bot-zj' } : null),
   }
-  const watcher = new GroupCommandWatcher({ dbFile, agent, provider, profileStore, contextTokens, cursorFile, initialCursor: 0 })
+  const watcher = new GroupCommandWatcher({ dbFile, agent, provider, profileStore, contextTokens, cursorFile, initialCursor: 0, progress: { ackDelayMs: 5, intervalMs: 10_000 } })
   return { dbFile, cursorFile, watcher, calls, sent }
 }
 
@@ -44,6 +50,7 @@ const QUOTE_ATTACHMENT = JSON.stringify({ kind: 'quote', reply: '@助手 看一�
 
 test('watcher turns a group @助手 quote into an agent call and a private push', async () => {
   const { cursorFile, watcher, calls, sent } = setup({
+    agentDelay: 60, // 模拟长任务：ack（10ms）应在此期间发出
     rows: [{ msg_id: 'm1', chat_wxid: '53512663852@chatroom', chat_display: 'Agent安全测试群', ts: 1789471204, sender_display: 'Z.俊', content: '@助手\u2005看一下', attachment: QUOTE_ATTACHMENT }],
   })
   try {
@@ -58,11 +65,13 @@ test('watcher turns a group @助手 quote into an agent call and a private push'
     // 身份与私聊通道：会话键 = ilinkUserId（与私聊一致），不是浏览器档案 id
     assert.equal(calls[0].userId, 'ilink_zj')
     assert.equal(calls[0].channel.toProviderUserId, 'ilink_zj')
-    // 秒回 ack（先确认，再结果）
-    assert.equal(sent.length, 2)
-    assert.match(sent[0].text, /收到你的指令，正在处理/)
+    // 长任务体验：ack（延迟 5ms 触发）+ 结果，两条都发给该用户
+    const waitFor = async (fn, ms = 500) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise((r) => setTimeout(r, 10)) } return false }
+    await waitFor(() => sent.length >= 2)
+    assert.ok(sent.length >= 2, `expected ack + result, got ${sent.length}`)
+    assert.match(sent[0].text, /收到，正在处理/)
     assert.equal(sent[0].toProviderUserId, 'ilink_zj')
-    assert.match(sent[1].text, /已处理：看一下/)
+    assert.match(sent[sent.length - 1].text, /已处理：看一下/)
     // 第二轮 sweep 不重复（msg_id 去重 + 游标推进）
     await watcher.sweep()
     assert.equal(calls.length, 1)
@@ -102,6 +111,7 @@ test('watcher skips users without a private-channel token (no push possible)', a
 
 test('watcher picks the matching profile that has a push channel, skipping tokenless duplicates', async () => {
   const { cursorFile, watcher, calls, sent } = setup({
+    agentDelay: 60,
     rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 100, sender_display: 'Z.俊', content: '@助手 读一下', attachment: QUOTE_ATTACHMENT }],
     // 第一个同名档案无 token（test-user 式残留），第二个有 token —— 应选第二个
     profiles: [
@@ -114,8 +124,10 @@ test('watcher picks the matching profile that has a push channel, skipping token
     assert.equal(calls.length, 1)
     assert.equal(calls[0].userId, 'ilink_zj') // 会话键 = 稳定 ilinkUserId（与私聊一致）
     assert.equal(calls[0].channel.toProviderUserId, 'ilink_zj')
-    assert.equal(sent.length, 2) // ack + 结果
-    assert.match(sent[0].text, /收到你的指令/)
+    const t0 = Date.now()
+    while (Date.now() - t0 < 500 && sent.length < 2) await new Promise((r) => setTimeout(r, 10))
+    assert.ok(sent.length >= 2, `expected ack + result, got ${sent.length}`)
+    assert.match(sent[0].text, /收到，正在处理/)
   } finally {
     fs.rmSync(cursorFile, { force: true })
   }

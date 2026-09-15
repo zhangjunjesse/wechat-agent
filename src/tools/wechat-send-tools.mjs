@@ -91,5 +91,28 @@ export function wechatSendTools({ provider, root = process.env.USER_FILES_ROOT |
       return `已发送${label}：${fileName}`
     },
   })
-  return { sendFile }
+  /** agent 中途主动汇报进度（长任务体验：多步任务边做边说，用户不干等）。 */
+  const notifyUser = tool({
+    name: 'notify_user',
+    description:
+      '在处理需要较长时间的任务时，给用户发一条简短的进度说明（如"已查到最近 30 条记录，正在整理重点…"、"文档已导出，正在发送文件…"）。' +
+      '仅在任务预计超过 30 秒时使用，一次任务最多用 2-3 次；不要用它打招呼、不要用它代替最终回答（最终结果仍由正常回复给出）。',
+    parameters: {
+      type: 'object',
+      properties: { text: { type: 'string', description: '一句话进度说明（不要长篇）' } },
+      required: ['text'],
+    },
+    execute: async (input, ctx) => {
+      const channel = ctx?.context?.channel
+      if (!channel || channel.type !== 'ilink') return '当前渠道不支持主动消息（仅微信对话可用）。'
+      try {
+        await provider.sendText({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, text: String(input.text || '') })
+        return '已发送进度提示。'
+      } catch (error) {
+        return `发送进度提示失败：${error?.message || error}`
+      }
+    },
+  })
+
+  return { sendFile, notifyUser }
 }

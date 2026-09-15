@@ -1,4 +1,5 @@
 import { assertInboundEvent } from '../contracts/bot-provider.mjs'
+import { createProgressNotifier } from './progress-notifier.mjs'
 
 export class MessageRouter {
   #bindings
@@ -9,8 +10,9 @@ export class MessageRouter {
   #contextProvider
   #requireVerified
   #contextTokens
+  #progress
 
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = {} }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
@@ -18,6 +20,7 @@ export class MessageRouter {
     this.#contextProvider = contextProvider
     this.#requireVerified = requireVerified
     this.#contextTokens = contextTokens
+    this.#progress = progress
   }
 
   async handleInbound(event) {
@@ -52,7 +55,25 @@ export class MessageRouter {
     // the agent itself. Web chat calls agent.respond() with no channel at
     // all, so tools that need it degrade gracefully (see wechat-send-tools.mjs).
     const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
-    const reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text || '用户发送了附件。', profile, channel, attachments: normalized.attachments || [] })
+    // 长任务体验：8 秒未完成先 ack，之后每 40 秒心跳（避免用户干等无感知）。
+    // 发送用最新 token（长任务期间可能刷新）。
+    const notifier = createProgressNotifier({
+      provider: this.#provider,
+      channel: { ...channel, contextToken: this.#contextTokens?.get(normalized.providerUserId)?.contextToken || normalized.contextToken },
+      ...this.#progress,
+    })
+    notifier.start()
+    let reply
+    try {
+      reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text || '用户发送了附件。', profile, channel, attachments: normalized.attachments || [] })
+    } catch (error) {
+      // 失败必告知（不再静默——用户至少知道出了问题）
+      notifier.stop()
+      const msg = `⚠️ 处理出错了：${error?.message || error}\n可以再发一次，或换个说法；如果反复失败，请把这条错误发给我。`
+      try { await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: msg, contextToken: normalized.contextToken }) } catch { /* 连错误都发不出则只能记日志 */ }
+      throw error
+    }
+    notifier.stop()
     history.push({ role: 'assistant', text: reply.text })
     this.#conversations.set(key, history)
     // Long tool-heavy turns (image gen, research) can take a minute+; the

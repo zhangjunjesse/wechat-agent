@@ -52,6 +52,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     todos.addTodo, todos.listTodo,
     misc.getCurrentTime, misc.askUser,
     send.sendFile,
+    send.notifyUser,
     gzh.gzhSearch, gzh.gzhContent,
     image.imageGenerate,
     poster.renderPoster,

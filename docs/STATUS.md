@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **298/298 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **308/308 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -194,6 +194,16 @@
   agent 处理（userId = profile.ilinkUserId，**与私聊同一会话键**）→ iLink 私聊推送。
 - 只响应 @助手 + 已绑定用户；msg_id 去重 + ts 游标落盘；首次启动不追溯历史。
 - 生产实测：群引用飞书链接 @助手 → 私聊收到回复 ✓。决策：`docs/ADR-0022-group-commands.md`。
+
+## 长任务进度反馈（ADR-0023，通用体验）
+
+- 问题：指派任务后要等几分钟才响应，期间零反馈 → 用户不安/焦虑。
+- `createProgressNotifier`（入口层共用，不依赖模型）：**8 秒延迟 ack**（短任务不打扰）
+  + **40 秒心跳**（最多 5 条）+ **失败必告知**（不再静默）；私聊 `MessageRouter` 与群
+  命令 `GroupCommandWatcher` 共用。
+- agent 侧新增 `notify_user` 工具（多步任务主动汇报进度，一次最多 2-3 次）+
+  `PACE_RULES` 第 4 条长任务节奏规则。
+- 决策：`docs/ADR-0023-long-task-feedback.md`。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线
