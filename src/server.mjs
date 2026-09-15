@@ -129,7 +129,7 @@ const subagentRunner = agent ? new SubagentRunner({
 }) : null
 if (subagentRunner) {
   const { delegateTools } = await import('./tools/delegate-tools.mjs')
-  const dt = delegateTools({ taskRunStore, runner: subagentRunner, minSeconds: Number(process.env.DELEGATE_MIN_SECONDS || 30) })
+  const dt = delegateTools({ taskRunStore, runner: subagentRunner })
   tools.push(dt.delegateTask, dt.listTasks, dt.taskStatus, dt.retryTask)
 }
 

@@ -115,6 +115,10 @@ test('subagent prompt is self-contained and settlement texts cover all statuses'
   assert.match(prompt, /用户偏好中文/)
   assert.match(prompt, /send_file/)
   assert.match(prompt, /结果说明/)
+  // 子 agent 拿到的静态 instructions 里有"默认委派"的节奏规则，但它没有委派工具 →
+  // 提示词必须显式说明"你就是后台执行者"（ADR-0025 的可见性一致性）
+  assert.match(prompt, /你就是后台执行者/)
+  assert.match(prompt, /没有 delegate_task/)
   assert.match(renderSettlementText({ id: 'task-1', status: 'done', result: 'ok' }), /任务 task-1 完成/)
   assert.match(renderSettlementText({ id: 'task-1', status: 'cancelled' }), /已取消/)
   const long = renderSettlementText({ id: 'task-1', status: 'done', result: 'x'.repeat(400) })

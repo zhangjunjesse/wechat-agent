@@ -1,23 +1,34 @@
 import { tool } from '@openai/agents'
 
-/** 任务委派工具集（DESIGN-task-delegation.md / ADR-0024）。
+/** 任务委派工具集（DESIGN-task-delegation.md / ADR-0024，判据重构见 ADR-0025）。
  *
- * 主 agent 用它把"自包含 + 多步 + 耗时"的任务派给后台子 agent，**立即返回**并
+ * 主 agent 用它把"自包含 + 会卡住当前对话"的任务派给后台子 agent，**立即返回**并
  * 继续接待用户；子任务完成后由 SubagentRunner 主动通知用户。
  *
- * 判断标准（与 skills/task-delegation/SKILL.md 一致，四条全过才派）：
- *   自包含（无需澄清）/ 多步（≥3 次工具调用或等外部 API）/ 预计 ≥30 秒 / 不依赖当前对话。
- * 不该派：简单问答、需澄清或多轮交互、用户催"马上"且任务很快、敏感操作要逐步确认、
- *   同一目标已在处理中。 */
-export function delegateTools({ taskRunStore, runner, minSeconds = 30 } = {}) {
+ * 判断标准（ADR-0025 起改为**操作类型清单**，不再靠估时间/数工具调用次数）：
+ *   命中清单（导出/下载文件、批量处理、生成文档与图片、多篇抓取汇总、等外部异步接口）
+ *   且任务自包含（无需澄清）→ 默认派发。
+ * 不该派：单条查询、简单问答、发一条消息、需澄清或多轮交互、敏感操作要逐步确认、
+ *   同一目标已在处理中（派发前先 list_tasks 查）。
+ *
+ * 判据文案放在**工具描述**里（而非只放在静态 prompt 或按需加载的 skill 里）：
+ * 工具描述是每轮都在上下文里的稳定表面，模型选择工具时必然读到。 */
+export function delegateTools({ taskRunStore, runner } = {}) {
   const delegateTask = tool({
     name: 'delegate_task',
     description:
-      '把一个**自包含、多步、耗时（预计 ≥' + minSeconds + ' 秒）**的任务派给后台子 agent 执行，立即返回，不占用当前对话。' +
-      '子 agent **看不到你与用户的对话**，所以 goal 必须写成完整、独立、无需追问的任务描述（含：要做什么、交付什么形式、成功标准、边界）。' +
-      '适用：导出/下载文档、抓取多篇文章并总结、批量处理文件、生成长文档或图片、需要等待外部接口的活。' +
-      '不适用：简单问答与单次查询（直接回答）、需要与用户澄清的任务（先问清）、用户要求"马上"且任务很快的。' +
-      '派发后请立即告诉用户"已派发任务 #N"，**不要承诺具体结果**（结果由子任务完成通知给出）；完成后系统会自动通知用户。',
+      '把一个**会卡住当前对话的活**派给后台子 agent 执行，立即返回，不占用当前对话。' +
+      '【什么时候必须用】只要命中下面任一操作类型，就默认派发，不要自己闷头做：' +
+      '① 导出/下载文件（飞书文档导出、附件下载、大文件转换）；' +
+      '② 批量处理（多个文件、多条数据、多个群/多次发送）；' +
+      '③ 生成文档/图片/海报/报告；' +
+      '④ 抓取多篇内容再汇总；' +
+      '⑤ 任何要等外部异步接口（导出任务、长轮询、第三方处理）的活。' +
+      '**判据看操作类型，不要靠估时间、也不要看自己调了几次工具**——单次调用也可能跑一分钟（如 lark_export_doc）。' +
+      '【什么时候不要用】单条查询/简单问答（直接回答）、发一条消息、需要先跟用户澄清（先问清）、敏感操作要逐步确认、同一目标已有进行中的任务。' +
+      '【派发前】先 list_tasks 查有没有进行中的同类任务：已有就报它的进度（用 task_status 拿已用时长），不要重复派。' +
+      '【派发后】只回一句"已派发任务 #N，完成后发你"，**不要承诺具体结果、不要自己接着做、不要轮询**；结果由系统完成通知给出。' +
+      'goal 必须自包含：子 agent **看不到你和用户的对话**，所以要写清"做什么 + 交付什么形式 + 成功标准 + 边界"。',
     parameters: {
       type: 'object',
       properties: {
@@ -45,7 +56,7 @@ export function delegateTools({ taskRunStore, runner, minSeconds = 30 } = {}) {
 
   const listTasks = tool({
     name: 'list_tasks',
-    description: '列出当前用户派发过的后台任务（任务 id / 目标 / 状态 / 时间），用于回答"我派的任务怎么样了"。',
+    description: '列出当前用户派发过的后台任务（任务 id / 目标 / 状态 / 已用时长）。两个用途：① 派发或动手前先查有没有进行中的同类任务（避免重复派/重复做）；② 回答"我派的任务怎么样了"。',
     parameters: {
       type: 'object',
       properties: { limit: { type: 'number', description: '返回条数，默认 10' } },
@@ -59,14 +70,14 @@ export function delegateTools({ taskRunStore, runner, minSeconds = 30 } = {}) {
       return list.map((t) => {
         const label = STATUS_LABEL[t.status] || t.status
         const when = new Date(t.createdAt).toISOString().slice(5, 16).replace('T', ' ')
-        return `- ${t.id}｜${label}｜${when}｜${t.goal.slice(0, 40)}${t.goal.length > 40 ? '…' : ''}`
+        return `- ${t.id}｜${label}${elapsedSuffix(t)}｜${when}｜${t.goal.slice(0, 40)}${t.goal.length > 40 ? '…' : ''}`
       }).join('\n')
     },
   })
 
   const taskStatus = tool({
     name: 'task_status',
-    description: '查看某个后台任务的详情（状态 / 结果 / 错误 / 耗时）。用户问"任务 #N 怎么样了"时使用；不要用它反复轮询。',
+    description: '查看某个后台任务的详情（状态 / 结果 / 错误 / 已用时长）。用户催问"任务 #N 好了吗"或"还要多久"时用它如实回答"处理中（已 N 秒）"；不要用它反复轮询。',
     parameters: {
       type: 'object',
       properties: { id: { type: 'string', description: '任务 id，如 task-3' } },
@@ -78,12 +89,12 @@ export function delegateTools({ taskRunStore, runner, minSeconds = 30 } = {}) {
       const task = taskRunStore.get(String(input.id).trim())
       if (!task || task.userId !== String(userId)) return `找不到任务 ${input.id}（只能查看自己的任务）。`
       const lines = [
-        `${task.id}｜${STATUS_LABEL[task.status] || task.status}`,
+        `${task.id}｜${STATUS_LABEL[task.status] || task.status}${elapsedSuffix(task)}`,
         `目标：${task.goal}`,
         `创建：${new Date(task.createdAt).toISOString()}`,
       ]
       if (task.startedAt) lines.push(`开始：${new Date(task.startedAt).toISOString()}`)
-      if (task.finishedAt) lines.push(`结束：${new Date(task.finishedAt).toISOString()}（耗时 ${Math.round((task.finishedAt - task.startedAt) / 1000)} 秒）`)
+      if (task.finishedAt) lines.push(`结束：${new Date(task.finishedAt).toISOString()}（耗时 ${durationSeconds(task.startedAt || task.createdAt, task.finishedAt)} 秒）`)
       if (task.result) lines.push(`结果：${task.result}`)
       if (task.resultFiles?.length) lines.push(`产物：${task.resultFiles.join('、')}`)
       if (task.error) lines.push(`错误：${task.error}`)
@@ -124,4 +135,18 @@ const STATUS_LABEL = {
   failed: '失败',
   timeout: '超时',
   cancelled: '已取消',
+}
+
+/** 已用/耗时秒数（ADR-0025：派发路径必须让用户看到时间，否则"在吗/好了吗"会逼回自己动手）。 */
+function durationSeconds(fromMs, toMs = Date.now()) {
+  const from = Number(fromMs) || 0
+  if (!from) return 0
+  return Math.max(0, Math.round((toMs - from) / 1000))
+}
+
+/** 进行中任务的时间后缀「 · 已用 42 秒」；排队中/已结束不重复状态词，返回空串。 */
+function elapsedSuffix(task) {
+  if (task.status !== 'running') return ''
+  const s = durationSeconds(task.startedAt || task.createdAt)
+  return s ? ` · 已用 ${s} 秒` : ''
 }

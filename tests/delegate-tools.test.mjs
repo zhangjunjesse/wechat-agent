@@ -15,7 +15,7 @@ function setup() {
   const store = new TaskRunStore({ file })
   const enqueued = []
   const runner = { enqueue: (item) => { enqueued.push(item); return true } }
-  const tools = delegateTools({ taskRunStore: store, runner, minSeconds: 30 })
+  const tools = delegateTools({ taskRunStore: store, runner })
   const ctx = (userId = 'u1') => ({ context: { userId, profile: { nickname: 'Z.俊' }, channel: { type: 'ilink', contextToken: 'tok' } } })
   return { file, store, tools, enqueued, ctx }
 }
@@ -81,6 +81,41 @@ test('delegate tools degrade gracefully when not configured', async () => {
   const tools = delegateTools({ taskRunStore: null, runner: null })
   assert.match(await call(tools.delegateTask, { goal: 'x' }, { context: { userId: 'u1' } }), /未启用/)
   assert.match(await call(tools.listTasks, {}, { context: { userId: 'u1' } }), /未启用/)
+})
+
+test('delegate_task description carries the operation-type criteria, not a seconds threshold (ADR-0025)', async () => {
+  const { tools } = setup()
+  const d = tools.delegateTask.description
+  // 判据 = 操作类型清单（单次调用也可能很慢，不能靠估时间/数调用次数）
+  assert.match(d, /导出\/下载文件/)
+  assert.match(d, /生成文档\/图片/)
+  assert.match(d, /外部异步接口/)
+  assert.match(d, /判据看操作类型/)
+  assert.match(d, /不要靠估时间/)
+  // 派发前先查进行中任务
+  assert.match(d, /list_tasks/)
+  // 派发后不承诺结果、不自己接着做
+  assert.match(d, /不要承诺具体结果/)
+  // 旧的秒数判据已被移除（避免"≥30 秒"这类错代理指标回归）
+  assert.doesNotMatch(d, /\d+\s*秒/)
+  assert.doesNotMatch(d, /minSeconds/)
+})
+
+test('task_status / list_tasks expose elapsed seconds for in-flight tasks', async () => {
+  const { file, store, tools, ctx } = setup()
+  try {
+    const t = store.create({ userId: 'u1', goal: '导出飞书文档' })
+    const pending = await call(tools.listTasks, {}, ctx('u1'))
+    assert.match(pending, /排队中/)
+    store.markRunning(t.id, Date.now() - 42_000)
+    const list = await call(tools.listTasks, {}, ctx('u1'))
+    assert.match(list, /已用 (4[0-9]|5[0-9]) 秒/)
+    const detail = await call(tools.taskStatus, { id: t.id }, ctx('u1'))
+    assert.match(detail, /执行中 · 已用 (4[0-9]|5[0-9]) 秒/)
+    assert.match(detail, /开始：/)
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
 })
 
 test('subagent tool set is restricted: can deliver/progress, cannot delegate again or touch task catalogs', async () => {

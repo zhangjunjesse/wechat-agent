@@ -19,7 +19,9 @@ export function imageTools({ root = process.env.USER_FILES_ROOT || 'data/user-fi
       'inpaint=局部重绘（只改 mask 透明区域，其余原样）。' +
       'prompt 必填；edit/inpaint 需要 image（原图路径）；inpaint 还需要 mask（PNG，透明区域=待重绘区，尺寸须与原图一致）。' +
       '参考图用之前收到的图片附件（inbox/ 目录）或 write_file/run_code 生成的图片的相对路径。' +
-      '生成完成后返回图片文件路径，必须再调用 send_file 把图片作为真实消息发给用户。',
+      '生成完成后返回图片文件路径，必须再调用 send_file 把图片作为真实消息发给用户。' +
+      '⚠️ **慢工具**：出图要提交任务并等待（通常 20–60 秒），**单次调用就会卡住当前对话**（别因为"只调了一次"就当它快）。' +
+      '若你在主对话里（有 delegate_task 可用）→ 先把出图派给后台子任务；若你本身就是执行该任务的子任务 → 直接调用，耐心等返回。',
     parameters: {
       type: 'object',
       properties: {

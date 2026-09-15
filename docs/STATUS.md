@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **324/324 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **329/329 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -216,11 +216,29 @@
 - 任务管理：`TaskRunStore`（SQLite `data/task-runs.db`；状态机 pending→running→
   done|failed|timeout|cancelled，首次结果优先、终态 7 天归档）+ 工具 `list_tasks`/
   `task_status`/`retry_task`；与用户 `todo`（记忆系统）职责分离（"要做什么" vs "做到哪了"）。
-- 判断力三层：四条硬判据（工具描述 + `skills/task-delegation` 技能 SOP，ADR-0013 动态加载）
-  + `PACE_RULES` 委派规则 + **校准**（`stats()` 短任务派发率/失败率、用户纠正写记忆、env 阈值）。
+- 判断力三层：~~四条硬判据（工具描述 + `skills/task-delegation` 技能 SOP，ADR-0013 动态加载）~~
+  → **已被 ADR-0025 重构：判据 = 操作类型清单，写进 `delegate_task` 工具描述 + `PACE_RULES`
+  第 4/5/6 条（每轮必然可见）；skill 降级为细节手册（goal 模板/汇报话术/反例）**
+  + **校准**（`stats()` 短任务派发率/失败率、用户纠正写记忆、并发/超时 env）。
 - 依据 DSH 真实实现（三份研究报告 `docs/research-dsh-*.md`）；与 DSH 的有意偏离（落库/队列/
   禁递归/通知带摘要）见 ADR-0024。ADR-0023 的定期心跳收敛为"兜底 ack + 失败必告知"。
 - 决策：`docs/DESIGN-task-delegation.md` → `docs/ADR-0024-task-delegation.md`。
+
+## 委派判据重构（ADR-0025，2026-09-16）
+
+- 事故：用户"把这个飞书文档下载给我" → 主 agent 没派发，自己在主对话里等 `lark_export_doc`
+  （异步导出 10–60 秒），用户连问"在吗/好了吗"。agent 自述"只有一次工具调用，不算多步"。
+- 根因：① 判据用错代理指标（"≥3 次工具调用 / ≥30 秒"漏判**单步但慢**的操作）；
+  ② 判据放在按需加载的 skill 里 = 默认缺席，而每轮在场的工具描述里没判据；
+  ③ 没有"动手前先 `list_tasks`"的规则 → 任务多轮长大时每轮重复自己干；
+  ④ 派发路径可见性低于自己动手 → 用户压力把 agent 逼回自己做。
+- 改法：判据改为**操作类型清单**（导出/下载文件、批量处理、生成文档图片、多篇抓取汇总、
+  等外部异步接口）；判据搬进 `delegate_task` 工具描述 + `PACE_RULES` 第 4/5/6 条；
+  `lark_export_doc`/`image_generate` 自声明"慢工具，单次调用也卡对话"；
+  `list_tasks` 双用途（派发前查重）；`list_tasks`/`task_status` 输出**已用秒数**；
+  `DELEGATE_MIN_SECONDS` 删除。
+- 验证：`node --test tests/delegate-tools.test.mjs` **7/7**（新增 2 条防回归断言）。
+- 决策：`docs/ADR-0025-delegation-criteria.md`（部分取代 ADR-0024 的判断力条款）。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线

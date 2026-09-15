@@ -95,8 +95,9 @@ export function wechatSendTools({ provider, root = process.env.USER_FILES_ROOT |
   const notifyUser = tool({
     name: 'notify_user',
     description:
-      '在处理需要较长时间的任务时，给用户发一条简短的进度说明（如"已查到最近 30 条记录，正在整理重点…"、"文档已导出，正在发送文件…"）。' +
-      '仅在任务预计超过 30 秒时使用，一次任务最多用 2-3 次；不要用它打招呼、不要用它代替最终回答（最终结果仍由正常回复给出）。',
+      '在处理长任务时，给用户发一条简短的进度说明（如"已查到最近 30 条记录，正在整理重点…"、"文档已导出，正在发送文件…"）。' +
+      '用在长任务场景：已派发后台任务后的等待期、正在等外部异步接口、或在多步处理的中途；' +
+      '一次任务最多用 2-3 次；不要用它打招呼、不要用它代替最终回答（最终结果仍由正常回复给出）。',
     parameters: {
       type: 'object',
       properties: { text: { type: 'string', description: '一句话进度说明（不要长篇）' } },
