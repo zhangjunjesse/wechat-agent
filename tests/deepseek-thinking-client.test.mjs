@@ -67,6 +67,46 @@ test('injection aligns to the TAIL: history assistant messages stay untouched, t
   assert.ok(mine.tool_calls, '注入不应破坏 tool_calls')
 })
 
+test('every tool_calls message gets reasoning_content even when the cache has fewer entries or is empty', async () => {
+  // 生产事故（第二轮）：一轮 run 内有 2 条 tool_calls 消息，但某轮响应没有 reasoning
+  // → rc 比本轮 tool_calls 消息少 → 数量对齐漏掉较早那条 → 400。
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning('R1') })
+  const { client: wrapped, reset } = wrapClientForDeepSeek(client)
+  reset()
+  const tc1 = { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' } }] }
+  const tc2 = { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'b', arguments: '{}' } }] }
+
+  // 缓存为空 + 请求里已有 tool_calls 消息 → 也要补上（否则 400）
+  await wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'u' }, tc1, { role: 'tool', tool_call_id: 'c1', content: 'r' }] })
+  const first = calls[0].body.messages.filter((m) => m.role === 'assistant')
+  assert.ok(first.every((m) => typeof m.reasoning_content === 'string' && m.reasoning_content.length > 0), 'rc 为空时 tool_calls 消息也要补齐 reasoning_content')
+
+  // 缓存只有 1 条，但请求里有 2 条本轮 tool_calls 消息 → 两条都必须带
+  await wrapped.chat.completions.create({
+    messages: [{ role: 'user', content: 'u' }, tc1, { role: 'tool', tool_call_id: 'c1', content: 'r' }, tc2, { role: 'tool', tool_call_id: 'c2', content: 'r2' }],
+  })
+  const second = calls[1].body.messages.filter((m) => m.role === 'assistant')
+  assert.equal(second.length, 2)
+  for (const m of second) {
+    assert.equal(typeof m.reasoning_content, 'string')
+    assert.ok(m.reasoning_content.length > 0, '每条 tool_calls 消息都必须有 reasoning_content')
+  }
+  assert.equal(second[second.length - 1].reasoning_content, 'R1') // 最后一条拿到真实值
+})
+
+test('a tool_calls message carrying reasoning_content: null is still filled (SDK providerData case)', async () => {
+  // SDK 的 OpenAIChatCompletionsModel 会在 tool_call 消息上带 reasoning_content: null；
+  // 用 `'reasoning_content' in m` 判断会放过它 → DeepSeek 400（生产第三轮复现）。
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning('R') })
+  const { client: wrapped, reset } = wrapClientForDeepSeek(client)
+  reset()
+  const tcNull = { role: 'assistant', content: null, reasoning_content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' } }] }
+  await wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'u' }, tcNull, { role: 'tool', tool_call_id: 'c1', content: 'r' }] })
+  const sent = calls[0].body.messages.find((m) => m.role === 'assistant')
+  assert.ok(typeof sent.reasoning_content === 'string' && sent.reasoning_content.length > 0, `null 必须被填充，实际: ${JSON.stringify(sent.reasoning_content)}`)
+  assert.ok(sent.tool_calls)
+})
+
 test('does not double-inject when the message already carries reasoning_content', async () => {
   const { client, calls } = fakeClient({ respond: () => completionWithReasoning('fresh') })
   const { client: wrapped, reset } = wrapClientForDeepSeek(client)
@@ -99,23 +139,24 @@ test('responses without reasoning_content do not extend the cache', async () => 
   assert.equal('reasoning_content' in assistant, false)
 })
 
-test('concurrent runs can misalign the shared reasoning cache — must be serialized at the caller', async () => {
-  // 演示：两个 run 并发时，run B 的 reset() 会清掉 run A 尚未消费的缓存，
-  // 导致 run A 下一轮 assistant 消息拿不到 reasoning_content（DeepSeek 400）。
-  // AgentsSdkAgent.respond 已用 createSerialQueue 串行化 run，避免此场景。
+test('concurrent cache resets no longer cause a 400: tool_calls always end up with reasoning_content', async () => {
+  // 先前版本：并发 run 的 reset() 会清掉 run A 未消费的缓存 → run A 的 tool_calls 消息
+  // 缺 reasoning_content → DeepSeek 400（AgentsSdkAgent 因此加了串行队列）。
+  // 现在兜底逻辑保证：**任何 tool_calls 消息最终都会带上 reasoning_content**，
+  // 因此即便缓存被并发清空也不会 400（串行队列仍然保留，用于减少缓存错位）。
   const delay = (ms) => new Promise((r) => setTimeout(r, ms))
   const { client, calls } = fakeClient({
     respond: async () => { await delay(10); return completionWithReasoning(`think-${calls.length}`) },
   })
   const { client: wrapped, reset } = wrapClientForDeepSeek(client)
   reset()
-  // run A turn1 还在飞 → run B 开始（reset 清缓存）→ run A turn2 的 assistant 消息将缺 reasoning
   const a1 = wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'a1' }] })
-  const bReset = reset()
+  const bReset = reset() // 模拟并发 run B 开始，清空缓存
   const b1 = wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'b1' }] })
   const a2 = wrapped.chat.completions.create({ messages: [{ role: 'assistant', content: 'aa', tool_calls: [{ id: 't', type: 'function', function: { name: 'f', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 't', content: 'r' }, { role: 'user', content: 'a2' }] })
   await Promise.all([a1, bReset, b1, a2])
-  const a2Assistant = calls.find((c) => c.body.messages.some((m) => m.role === 'assistant' && m.content === 'aa'))
-  // 并发下 run A 的 turn2 未拿到缓存注入（'reasoning_content' in m === false）→ 正是 400 根因
-  assert.equal('reasoning_content' in a2Assistant.body.messages.find((m) => m.role === 'assistant'), false)
+  const a2Call = calls.find((c) => c.body.messages.some((m) => m.role === 'assistant' && m.content === 'aa'))
+  const assistant = a2Call.body.messages.find((m) => m.role === 'assistant')
+  assert.ok(typeof assistant.reasoning_content === 'string' && assistant.reasoning_content.length > 0, 'tool_calls 消息必须带上 reasoning_content（兜底防 400）')
+  assert.ok(assistant.tool_calls, '不得破坏 tool_calls')
 })

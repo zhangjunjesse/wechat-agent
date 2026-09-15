@@ -21,28 +21,42 @@ export function wrapClientForDeepSeek(client) {
 
   completions.create = (body, options) => {
     let injected = body
-    if (body && Array.isArray(body.messages) && rc.length > 0) {
-      // 注入必须**从尾部对齐**：rc 缓存的是"本次 run 内"产生的 reasoning，而本次 run
-      // 产生的 assistant 消息总在请求的尾部（历史消息在其前面）。早期版本从第 1 条
-      // assistant 开始填，会把本轮 reasoning 错填到最早的历史消息上，导致本轮
-      // tool_calls 消息缺 reasoning_content → DeepSeek 400（生产实测：232 条消息里
-      // 113 条历史 + 1 条本轮工具调用，注入打在了"今天是星期四。"上）。
+    if (body && Array.isArray(body.messages)) {
+      // 注入规则（生产实测得出，见 docs/STATUS.md 与事故回归测试）：
+      //   DeepSeek 只对**带 tool_calls 的 assistant 消息**要求 reasoning_content；
+      //   而本轮 run 产生的 tool_calls 消息数量**可能多于**缓存的 reasoning 条数
+      //   （某轮响应没有/为空 reasoning、或缓存被并发 reset），数量对齐会漏掉较早的那条
+      //   → 400。因此分两步：
+      //   ① 尾部对齐注入真实 reasoning（本轮产生的 assistant 总在请求末尾）；
+      //   ② **兜底**：任何仍缺 reasoning_content 的 tool_calls 消息补占位值——
+      //      实测 DeepSeek 不校验 reasoning_content 的具体文本，只要求字段存在。
       const assistantIdx = []
       for (let i = 0; i < body.messages.length; i++) {
         if (body.messages[i]?.role === 'assistant') assistantIdx.push(i)
       }
-      const offset = assistantIdx.length - rc.length
-      const messages = [...body.messages]
-      for (let j = 0; j < rc.length; j++) {
-        const at = offset + j
-        if (at < 0) continue // 历史比缓存还少（异常），跳过
-        const i = assistantIdx[at]
-        const m = messages[i]
-        // Only inject when the message doesn't already carry it (the SDK's
-        // content branch already round-trips it via providerData).
-        if (m && !('reasoning_content' in m)) messages[i] = { ...m, reasoning_content: rc[j] }
+      const hasToolCallMsg = assistantIdx.some((i) => body.messages[i]?.tool_calls?.length)
+      if (rc.length > 0 || hasToolCallMsg) {
+        const messages = [...body.messages]
+        // ① 尾部对齐注入真实 reasoning（注意：**空值也算缺失**——SDK 可能自带
+        //    reasoning_content: null，用 `in` 判断会放过它 → DeepSeek 400）
+        const offset = assistantIdx.length - rc.length
+        for (let j = 0; j < rc.length; j++) {
+          const at = offset + j
+          if (at < 0) continue
+          const i = assistantIdx[at]
+          const m = messages[i]
+          if (m && !m.reasoning_content) messages[i] = { ...m, reasoning_content: rc[j] }
+        }
+        // ② 兜底：tool_calls 消息一律不能缺/不能为空 reasoning_content（rc 为空时也补）
+        const fallback = rc[rc.length - 1] || '（思考过程已省略）'
+        for (const i of assistantIdx) {
+          const m = messages[i]
+          if (m?.tool_calls?.length && !m.reasoning_content) {
+            messages[i] = { ...m, reasoning_content: fallback }
+          }
+        }
+        injected = { ...body, messages }
       }
-      injected = { ...body, messages }
     }
     const promise = originalCreate(injected, options)
     // Capture reasoning_content from the (non-streamed) response. JSON.parse
