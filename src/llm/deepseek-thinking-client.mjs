@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+
 /** DeepSeek thinking-mode 兼容层（chat completions 方向）。
  *
  * 问题：deepseek-flash / deepseek-v4-pro 默认开启思考模式，响应会带
@@ -68,12 +70,20 @@ export function wrapClientForDeepSeek(client) {
       }
       return res
     }).catch((err) => {
-      // 现场诊断（生产实测 400 reasoning_content，定位请求结构差异用）
+      // 现场诊断（生产实测 400 reasoning_content）：打印**注入后**的结构并落盘完整请求，
+      // 避免再靠推断（此前只看得到注入前的 body，导致多轮误判）。
       if (String(err?.message || '').includes('reasoning_content')) {
-        const msgs = body?.messages || []
-        const asIdx = msgs.map((m, i) => (m?.role === 'assistant' ? i : -1)).filter((i) => i >= 0)
-        const show = (m) => JSON.stringify(m).slice(0, 400)
-        console.error(`[thinking-400] rc_len=${rc.length} msg_count=${msgs.length} assistant_count=${asIdx.length}\n  first_as: ${show(msgs[asIdx[0]])}\n  last_as: ${show(msgs[asIdx[asIdx.length - 1]])}`)
+        const msgs = injected?.messages || []
+        const tcMsgs = msgs.filter((m) => m?.role === 'assistant' && m?.tool_calls?.length)
+        console.error(`[thinking-400] rc_len=${rc.length} msgs=${msgs.length} toolcall_msgs=${tcMsgs.length}`)
+        for (const [i, m] of tcMsgs.slice(-3).entries()) {
+          console.error(`  tc#${i} reasoning=${JSON.stringify(m.reasoning_content ?? null).slice(0, 60)} keys=${Object.keys(m).join(',')}`)
+        }
+        try {
+          const file = `/data/thinking-400-${Date.now()}.json`
+          fs.writeFileSync(file, JSON.stringify({ rcLen: rc.length, msgs: msgs.length, toolcallMsgs: tcMsgs.length, messages: msgs }))
+          console.error(`  [thinking-400] full request saved: ${file}`)
+        } catch { /* 落盘失败不致命 */ }
       }
       throw err
     })
