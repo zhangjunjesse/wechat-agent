@@ -9,7 +9,7 @@ import { resolveUserPath } from './services/user-sandbox.mjs'
 import { renderPage } from './ui-page.mjs'
 import { renderReportPage } from './services/daily-report.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null }) {
   const owned = []
   let polling
   const lastPollLog = new Map() // providerBotId -> { at, error }
@@ -95,6 +95,21 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       }
       const profileMatch = url.pathname.match(/^\/api\/profiles\/([^/]+)$/)
       if (req.method === 'GET' && profileMatch) return json(res, 200, { profile: await profileStore?.get(assertHeader(req, 'x-user-id')) })
+      // 飞书 OAuth 回调（ADR-0021）：?code=xxx&state=<userId> → 换 token 存 LarkTokenStore。
+      // 未配置 lark（LARK_APP_ID）时该路由 404，不影响现有功能。
+      const larkCallbackMatch = url.pathname.match(/^(?:\/wechat-agent)?\/lark\/auth\/callback$/)
+      if (req.method === 'GET' && larkCallbackMatch) {
+        if (!lark?.client) return json(res, 404, { error: 'lark_not_configured' })
+        const state = url.searchParams.get('state') || ''
+        const code = url.searchParams.get('code') || ''
+        if (!code || !state) return json(res, 400, { error: 'missing_code_or_state' })
+        try {
+          await lark.client.exchangeCode({ code, userId: state })
+          return html(res, 200, '<!doctype html><meta charset="utf-8"><title>飞书已授权</title><style>body{font:16px system-ui;max-width:480px;margin:60px auto;padding:0 20px;line-height:1.7}h1{font-size:22px}</style><h1>✅ 飞书已授权</h1><p>授权成功。现在可以回到微信，让助手帮你读写飞书文档了。</p><p>如果这是重复授权，刷新即可，不影响已有配置。</p>')
+        } catch (e) {
+          return json(res, 400, { error: `lark_auth_failed: ${e.message}` })
+        }
+      }
       if (req.method === 'POST' && url.pathname === '/api/chat') { const body = await readJson(req); const browserId = assertHeader(req, 'x-user-id'); const text = String(body.text || '').trim(); if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' }); const profile = await profileStore?.get(browserId); if (process.env.NODE_ENV === 'production' && !profile?.nickname && !profile?.wxid) return json(res, 403, { error: 'verification_required', message: '请先完成身份验证。' }); const userId = await profileStore?.stableKey(browserId); const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
       if (req.method === 'GET' && match) { const binding = await bindings.refresh(assertHeader(req, 'x-user-id'), match[1]); bind(binding); const live = owned.find((x) => x.id === binding.id); return json(res, 200, { ...binding, sessionExpired: live?.sessionExpired === true || false, lastPollError: live?.lastPollError || '' }) }

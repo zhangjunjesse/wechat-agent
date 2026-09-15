@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { SkillRegistry, validateSkillContent, parseSkillText } from '../src/skills/skill-registry.mjs'
 
 function writeSkill(dir, name, description, body) {
@@ -19,8 +20,7 @@ function makeDirs() {
   return { base, dir, userSkillsRoot }
 }
 
-test('global skills are discovered, listed and loaded without a userId', () => {
-  const { base, dir, userSkillsRoot } = makeDirs()
+test('global skills are discovered, listed and loaded without a userId', () => {  const { base, dir, userSkillsRoot } = makeDirs()
   writeSkill(dir, 'demo', '演示技能', '步骤：做演示')
   try {
     const reg = new SkillRegistry({ dir, userSkillsRoot })
@@ -186,4 +186,20 @@ test('addSkill writes a hot-effective global skill; removeSkill deletes it', () 
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }) } catch (e) {}
   }
+})
+
+test('real repo skills (incl. lark-docs) are discoverable and loadable via the registry (ADR-0013 dynamic loading)', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const reg = new SkillRegistry({ dir: path.join(repoRoot, 'skills') })
+  const names = reg.list().map((s) => s.name)
+  assert.ok(names.includes('lark-docs'), `skills should include lark-docs, got: ${names.join(', ')}`)
+  assert.ok(names.includes('wechat-gzh-research'))
+  assert.ok(names.includes('poster-render'))
+  // 全文按需加载（use_skill 路径）：get() 返回 instructions
+  const lark = reg.get(undefined, 'lark-docs')
+  assert.ok(lark)
+  assert.match(lark.instructions, /飞书文档读写/)
+  assert.match(lark.description, /飞书/)
+  // catalogText 动态携带一句话简介
+  assert.match(reg.catalogText(), /lark-docs/)
 })

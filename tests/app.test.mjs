@@ -7,6 +7,7 @@ import { createApp, listen } from '../src/app.mjs'
 import { MockBotProvider } from '../src/providers/mock-provider.mjs'
 import { DownloadTokenStore } from '../src/services/download-tokens.mjs'
 import { ReportStore } from '../src/services/report-store.mjs'
+import { LarkTokenStore } from '../src/services/lark-token-store.mjs'
 
 test('HTTP composition exposes health, binding, status, and webhook routes', async (t) => {
   const provider = new MockBotProvider()
@@ -110,4 +111,36 @@ test('GET /reports/:id serves the report page and cover route', async (t) => {
   const server2 = await listen(app2, { port: 0 })
   t.after(() => server2.close())
   assert.equal((await fetch(`http://127.0.0.1:${server2.address().port}/reports/x`)).status, 404)
+})
+
+test('GET /lark/auth/callback exchanges code when lark configured, 404 otherwise (ADR-0021)', async (t) => {
+  // 未配置 lark → 404，不影响其他功能
+  const app1 = createApp({ provider: new MockBotProvider() })
+  const server1 = await listen(app1, { port: 0 })
+  t.after(() => server1.close())
+  assert.equal((await fetch(`http://127.0.0.1:${server1.address().port}/lark/auth/callback?code=x&state=u1`)).status, 404)
+
+  // 配置 lark（mock client）→ 200 + token 入库 + 子路径前缀兼容
+  const file = path.join(os.tmpdir(), `app-lark-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const tokenStore = new LarkTokenStore({ file })
+  t.after(() => { tokenStore.close(); fs.rmSync(file, { force: true }) })
+  const exchanged = []
+  const lark = { client: { exchangeCode: async ({ code, userId }) => { exchanged.push({ code, userId }); tokenStore.set({ userId, accessToken: 'tok', refreshToken: 'r', expiresIn: 7200, refreshExpiresIn: 3600 }) } } }
+  const app2 = createApp({ provider: new MockBotProvider(), lark })
+  const server2 = await listen(app2, { port: 0 })
+  t.after(() => server2.close())
+  const base2 = `http://127.0.0.1:${server2.address().port}`
+
+  const ok = await fetch(`${base2}/lark/auth/callback?code=the-code&state=u9`)
+  assert.equal(ok.status, 200)
+  assert.deepEqual(exchanged, [{ code: 'the-code', userId: 'u9' }])
+  assert.equal(tokenStore.get('u9').accessToken, 'tok')
+  const okSub = await fetch(`${base2}/wechat-agent/lark/auth/callback?code=c2&state=u9`)
+  assert.equal(okSub.status, 200)
+  // 缺参 → 400；exchangeCode 抛错 → 400
+  assert.equal((await fetch(`${base2}/lark/auth/callback?code=only`)).status, 400)
+  const app3 = createApp({ provider: new MockBotProvider(), lark: { client: { exchangeCode: async () => { throw new Error('bad code') } } } })
+  const server3 = await listen(app3, { port: 0 })
+  t.after(() => server3.close())
+  assert.equal((await fetch(`http://127.0.0.1:${server3.address().port}/lark/auth/callback?code=bad&state=u1`)).status, 400)
 })

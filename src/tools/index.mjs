@@ -10,6 +10,7 @@ import { gzhTools } from './gzh-tools.mjs'
 import { manageSkillTools } from './manage-skill-tools.mjs'
 import { imageTools } from './image-tools.mjs'
 import { posterTools } from './poster-tools.mjs'
+import { larkTools } from './lark-tools.mjs'
 import { taskTools } from './task-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
@@ -32,7 +33,7 @@ import { taskTools } from './task-tools.mjs'
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore, lark }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -68,6 +69,13 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore })
     tools.push(wechat.wechatListChats, wechat.wechatSearchChat, wechat.wechatSearchMentions, wechat.wechatSearchMyMessages)
+  }
+  if (lark?.client) {
+    // 飞书文档（ADR-0021）：仅在配置 LARK_APP_ID/SECRET 时注册；redirectUri 供 OAuth 回调
+    const basePath = process.env.PUBLIC_BASE_PATH || '/wechat-agent/'
+    const redirectUri = `${(process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')}${basePath}lark/auth/callback`
+    const larkToolsSet = larkTools({ client: lark.client, redirectUri })
+    tools.push(larkToolsSet.larkAuth, larkToolsSet.larkAuthStatus, larkToolsSet.larkSearchDocs, larkToolsSet.larkReadDoc, larkToolsSet.larkCreateDoc, larkToolsSet.larkEditDoc)
   }
   return tools
 }

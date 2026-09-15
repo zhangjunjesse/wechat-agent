@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **279/279 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **289/289 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -170,6 +170,20 @@
 - **引导效果度量（ADR-0020）**：`guide_events` 埋点（曝光 `guide_shown`：subscribe/push；
   转化 `guide_converted`：chat）+ `scripts/guide-stats.mjs` 统计脚本（漏斗/入口分布/
   平均转化耗时/7 天趋势；生产 `TASKS_FILE=/data/tasks.db node scripts/guide-stats.mjs`）。
+
+## 飞书文档读写（ADR-0021，用户级 OAuth + 动态技能）
+
+- **授权**：用户级 OAuth（bot 身份访问不了用户个人文档）——`LarkTokenStore`
+  （`data/larks.db`，per-user token 自动刷新）+ `lark_auth`（授权链接，state 防 CSRF）
+  + `GET /lark/auth/callback` 回调换 token。
+- **工具**：`lark_auth` / `lark_auth_status` / `lark_search_docs` / `lark_read_doc` /
+  `lark_create_doc` / `lark_edit_doc`（写前 ask_user 确认）；`src/services/lark-client.mjs`
+  直连飞书开放平台（零新 npm 依赖）。
+- **技能**：`skills/lark-docs/SKILL.md` 走 ADR-0013 动态加载（use_skill 按需，不写死 prompt）。
+- **休眠开关**：条件注册——未配置 `LARK_APP_ID`/`LARK_APP_SECRET` 时整套不启用
+  （工具不注册、路由 404、行为零变化）；配好即用，需飞书后台配回调
+  `https://datadefender.cn/wechat-agent/lark/auth/callback`。
+- 决策：`docs/ADR-0021-lark-docs.md`。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线

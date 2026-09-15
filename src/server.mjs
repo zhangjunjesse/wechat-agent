@@ -23,6 +23,8 @@ import { MemoryProfiler } from './llm/memory-profile.mjs'
 import { createMemoryComplete } from './llm/memory-complete.mjs'
 import { renderPoster } from './services/poster-render.mjs'
 import { buildTools } from './tools/index.mjs'
+import { LarkTokenStore } from './services/lark-token-store.mjs'
+import { LarkClient } from './services/lark-client.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -90,7 +92,16 @@ process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')
 const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}files/${downloadTokens.issue(userId, relPath)}`
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore })
+// 飞书文档（ADR-0021）：条件启用——未配置 LARK_APP_ID/SECRET 时 lark 为 null，
+// 整套工具不注册、/lark/* 路由 404，服务器行为与未加此功能完全一致（零影响）。
+const larkAppId = process.env.LARK_APP_ID || ''
+const larkAppSecret = process.env.LARK_APP_SECRET || ''
+const lark = larkAppId && larkAppSecret
+  ? { client: new LarkClient({ appId: larkAppId, appSecret: larkAppSecret, tokenStore: new LarkTokenStore({ file: process.env.LARK_TOKENS_FILE || 'data/larks.db' }) }) }
+  : null
+if (!lark) console.warn('lark docs disabled: set LARK_APP_ID + LARK_APP_SECRET to enable (ADR-0021)')
+
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, lark })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
@@ -109,7 +120,7 @@ const posterRender = async (report, html) => {
 const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender }) : null
 scheduler?.start()
 
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore })
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
