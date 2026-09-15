@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **308/308 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **324/324 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -204,6 +204,23 @@
 - agent 侧新增 `notify_user` 工具（多步任务主动汇报进度，一次最多 2-3 次）+
   `PACE_RULES` 第 4 条长任务节奏规则。
 - 决策：`docs/ADR-0023-long-task-feedback.md`。
+
+## 任务委派（ADR-0024，主 agent 秒回 + 后台子 agent）
+
+- 主 agent 用 `delegate_task` 把「自包含+多步+耗时」任务派给后台子 agent，**工具立即返回**
+  「已派发任务 #N」→ 主 agent 秒回用户、继续接待其他消息；子任务结算时**无条件通知用户**
+  （成功/失败/超时都通知，`notified` 位防重）。
+- 关键实现：每子 agent **独立 AgentsSdkAgent 实例**（各自 thinking 缓存，避免 400）、
+  `ephemeral` 执行（不污染用户 session/记忆）、**受限工具集**（有 `send_file`/`notify_user`，
+  无 delegate/task 工具防递归）、每用户并发 2 + 队列排队、单任务超时 300s（env 可配）。
+- 任务管理：`TaskRunStore`（SQLite `data/task-runs.db`；状态机 pending→running→
+  done|failed|timeout|cancelled，首次结果优先、终态 7 天归档）+ 工具 `list_tasks`/
+  `task_status`/`retry_task`；与用户 `todo`（记忆系统）职责分离（"要做什么" vs "做到哪了"）。
+- 判断力三层：四条硬判据（工具描述 + `skills/task-delegation` 技能 SOP，ADR-0013 动态加载）
+  + `PACE_RULES` 委派规则 + **校准**（`stats()` 短任务派发率/失败率、用户纠正写记忆、env 阈值）。
+- 依据 DSH 真实实现（三份研究报告 `docs/research-dsh-*.md`）；与 DSH 的有意偏离（落库/队列/
+  禁递归/通知带摘要）见 ADR-0024。ADR-0023 的定期心跳收敛为"兜底 ack + 失败必告知"。
+- 决策：`docs/DESIGN-task-delegation.md` → `docs/ADR-0024-task-delegation.md`。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线

@@ -26,6 +26,8 @@ import { buildTools } from './tools/index.mjs'
 import { LarkTokenStore } from './services/lark-token-store.mjs'
 import { LarkClient } from './services/lark-client.mjs'
 import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
+import { TaskRunStore } from './services/task-run-store.mjs'
+import { SubagentRunner } from './services/subagent-runner.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -103,6 +105,30 @@ const lark = larkAppId && larkAppSecret
 if (!lark) console.warn('lark docs disabled: set LARK_APP_ID + LARK_APP_SECRET to enable (ADR-0021)')
 
 const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, lark })
+
+// 任务委派（DESIGN-task-delegation.md / ADR-0024）：
+// 主 agent 只决策与秒回；长任务交给后台子 agent（独立实例 + 独立 thinking 缓存，
+// 受限工具集：无 delegate/task 工具防递归，保留 send_file/notify_user 与业务工具）。
+const taskRunStore = new TaskRunStore({ file: process.env.TASK_RUNS_FILE || 'data/task-runs.db' })
+const subagentTools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore: null, reportStore: null, lark })
+const makeSubagent = () => process.env.OPENAI_API_KEY
+  ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools: subagentTools, skillRegistry })
+  : null
+const subagentRunner = agent ? new SubagentRunner({
+  agentFactory: makeSubagent,
+  store: taskRunStore,
+  provider,
+  contextTokens,
+  profileStore,
+  maxConcurrentPerUser: Number(process.env.DELEGATE_MAX_CONCURRENT || 2),
+  timeoutMs: Number(process.env.DELEGATE_TIMEOUT_MS || 300_000),
+  onError: (error, task) => console.warn(`subagent ${task?.id || '?'} notify failed: ${error?.message || error}`),
+}) : null
+if (subagentRunner) {
+  const { delegateTools } = await import('./tools/delegate-tools.mjs')
+  const dt = delegateTools({ taskRunStore, runner: subagentRunner, minSeconds: Number(process.env.DELEGATE_MIN_SECONDS || 30) })
+  tools.push(dt.delegateTask, dt.listTasks, dt.taskStatus, dt.retryTask)
+}
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
