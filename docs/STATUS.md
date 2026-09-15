@@ -58,7 +58,16 @@
     合并只标记不动原文；幂等（原卡 merged 后自动退出候选）。
   - 实施期修正：原设计的「≥3 字中文串 + 覆盖率 80%」实测两处都不对（整串会因改写失配；
     2 字片段会把「需要」当实体导致抖动）→ 改 3-4 字片段 + 通用字过滤 + 阈值 0.5。
-- **待办**：P3 `memory-generalize` → P4 `memory-profile` + recall 分层
+- **P3 已完成**（234/234 全绿）：
+  - `memory-generalize`：**第三层抽象泛化**——候选簇要求 ≥3 条同类 episodic 且时间跨度
+    ≥3 个北京时间日历天（同一天的重复不算"多次经历"）；LLM 提炼 semantic/procedural
+    （procedural 落库带「流程：」前缀、只是知识不是指令）；产物 `kind='generalized'`、
+    `type='semantic'`、`category` 沿用来源、`source_ids` 完整可追溯；**反空泛校验**
+    （与来源事实 ≥2 个 3-gram 重叠，或命中字母词），拦住「用户关注工作」式空话；
+    低价值来源卡（importance<0.4）归档为 `generalized_source`，高价值来源保留。
+  - 实施期修正：反空泛校验原设计复用"实体片段覆盖率"，实测会杀掉**合格**的抽象泛化
+    （泛化本就要改写措辞）→ 改 3-gram 重叠计数。
+- **待办**：P4 `memory-profile`（四段档案 + recall 分层注入 + 回退路径）
   → P5 `memory-maintenance` 编排 + server 接线 + Z.俊 真实数据端到端回放 + ADR-0016 收敛。
 
 ## 技能系统（ADR-0005/0006/0013，渐进式动态管理）

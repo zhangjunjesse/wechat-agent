@@ -282,8 +282,9 @@ export function sharedChineseEntities(items) {
   return [...counts.entries()].filter(([, n]) => n >= 2).map(([frag]) => frag)
 }
 
-/** 中文实体片段：连续汉字段里长度 3-4、不含通用字的片段（2 字片段噪声太大）。 */
-function chineseFragments(text) {
+/** 中文实体片段：连续汉字段里长度 3-4、不含通用字的片段（2 字片段噪声太大）。
+ * 导出给第三层泛化复用（作为"泛化内容必须锚定在来源事实"的锚点池）。 */
+export function chineseFragments(text) {
   const out = new Set()
   for (const m of String(text || '').matchAll(/[\u4e00-\u9fa5]+/g)) {
     const run = m[0]
