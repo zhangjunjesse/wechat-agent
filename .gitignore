@@ -13,3 +13,5 @@ data/*.db-shm
 data/user-files/
 data/user-skills/
 deploy/*.tgz
+
+tmp-preview/
