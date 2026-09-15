@@ -38,6 +38,35 @@ test('caches reasoning_content from responses and injects it back in order', asy
   assert.deepEqual(turn3.map((m) => m.reasoning_content), ['think-1', 'think-2'])
 })
 
+test('injection aligns to the TAIL: history assistant messages stay untouched, this-run tool-call gets the reasoning', async () => {
+  // 生产事故回归（232 条消息 400）：113 条历史 assistant + 本轮 tool_calls 消息。
+  // 早期实现从第一条 assistant 开始填 → reasoning 错填到最早的历史消息 → 本轮
+  // tool_calls 消息缺 reasoning_content → DeepSeek 400。
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning('R1') })
+  const { client: wrapped, reset } = wrapClientForDeepSeek(client)
+  reset()
+  const history = []
+  for (let i = 0; i < 113; i++) {
+    history.push({ role: 'user', content: `u${i}` })
+    history.push({ role: 'assistant', content: `a${i}` })
+  }
+  // run 内第一轮：只有历史 + 新问题，不注入
+  await wrapped.chat.completions.create({ messages: [...history, { role: 'user', content: '新问题' }] })
+  assert.ok(!calls[0].body.messages.some((m) => 'reasoning_content' in m), '历史请求不应被注入')
+  // run 内第二轮：请求尾部多了一条本轮 tool_calls 消息 → reasoning 必须注入到它
+  const toolCallMsg = { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lark_read_doc', arguments: '{}' } }], index: 0 }
+  await wrapped.chat.completions.create({
+    messages: [...history, { role: 'user', content: '新问题' }, toolCallMsg, { role: 'tool', tool_call_id: 'call_1', content: '结果' }],
+  })
+  const sent = calls[1].body.messages
+  const assistants = sent.filter((m) => m.role === 'assistant')
+  assert.ok(!('reasoning_content' in assistants[0]), '最早的历史 assistant 不应被注入')
+  assert.ok(!('reasoning_content' in assistants[1]), '其余历史也不应被注入')
+  const mine = assistants[assistants.length - 1]
+  assert.equal(mine.reasoning_content, 'R1')
+  assert.ok(mine.tool_calls, '注入不应破坏 tool_calls')
+})
+
 test('does not double-inject when the message already carries reasoning_content', async () => {
   const { client, calls } = fakeClient({ respond: () => completionWithReasoning('fresh') })
   const { client: wrapped, reset } = wrapClientForDeepSeek(client)

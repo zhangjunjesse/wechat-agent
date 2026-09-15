@@ -22,18 +22,26 @@ export function wrapClientForDeepSeek(client) {
   completions.create = (body, options) => {
     let injected = body
     if (body && Array.isArray(body.messages) && rc.length > 0) {
-      let k = 0
-      const messages = body.messages.map((m) => {
-        if (m && m.role === 'assistant') {
-          const idx = k++
-          // Only inject when the message doesn't already carry it (the SDK's
-          // content branch already round-trips it via providerData).
-          if (!('reasoning_content' in m) && idx < rc.length) {
-            return { ...m, reasoning_content: rc[idx] }
-          }
-        }
-        return m
-      })
+      // 注入必须**从尾部对齐**：rc 缓存的是"本次 run 内"产生的 reasoning，而本次 run
+      // 产生的 assistant 消息总在请求的尾部（历史消息在其前面）。早期版本从第 1 条
+      // assistant 开始填，会把本轮 reasoning 错填到最早的历史消息上，导致本轮
+      // tool_calls 消息缺 reasoning_content → DeepSeek 400（生产实测：232 条消息里
+      // 113 条历史 + 1 条本轮工具调用，注入打在了"今天是星期四。"上）。
+      const assistantIdx = []
+      for (let i = 0; i < body.messages.length; i++) {
+        if (body.messages[i]?.role === 'assistant') assistantIdx.push(i)
+      }
+      const offset = assistantIdx.length - rc.length
+      const messages = [...body.messages]
+      for (let j = 0; j < rc.length; j++) {
+        const at = offset + j
+        if (at < 0) continue // 历史比缓存还少（异常），跳过
+        const i = assistantIdx[at]
+        const m = messages[i]
+        // Only inject when the message doesn't already carry it (the SDK's
+        // content branch already round-trips it via providerData).
+        if (m && !('reasoning_content' in m)) messages[i] = { ...m, reasoning_content: rc[j] }
+      }
       injected = { ...body, messages }
     }
     const promise = originalCreate(injected, options)
