@@ -153,7 +153,7 @@ export class TaskScheduler {
       results.push(await this.#fanoutReport(task, userId, digest, report?.coverPath || ''))
     }
     // 解析失败也要可观测：lastError 记 report_unparsable（#tick 聚合 error 字段）
-    if (fallback) results.push({ userId: `task:${task.id}`, error: fallback })
+    if (fallback) results.push({ userId: runUserId, error: fallback })
     return results
   }
 
