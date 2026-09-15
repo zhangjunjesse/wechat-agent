@@ -3,6 +3,7 @@ import { MemoryExtractor } from './memory-extractor.mjs'
 import { estimateTokens } from '../services/tokenizer.mjs'
 import { beijingDateStr, beijingMidnight, beijingNowLine } from '../services/time.mjs'
 import { pruneTodos } from '../services/memory-pruner.mjs'
+import { scoreCard, ngrams } from '../services/memory-importance.mjs'
 
 /** 召回分层预算（DESIGN-memory-lifecycle §4.7）：档案优先，卡片按用途分配。 */
 export const PROFILE_TOKEN_BUDGET = 1200
@@ -133,11 +134,35 @@ export class MemoryManager {
   async absorb(userId, userText, assistantText) {
     let cards = []
     try { cards = await this.#extractor.extract(userText, assistantText, this.#now(), this.#store.listActive(userId)) } catch (e) { cards = [] }
-    for (const card of cards) card.action === 'update' ? this.#store.update(userId, card) : this.#store.insert(userId, card)
-    // 轻量维护（DESIGN-memory-lifecycle §4.6）：todo 过期/老化 → 归档（不物理删除）。
-    // 放在 absorb 的异步链里，既不阻塞用户回复，也不引入 LLM 调用。
-    try { pruneTodos(this.#store, userId, this.#now().getTime()) } catch (e) { /* 清理失败不影响本轮记忆写入 */ }
+    const written = []
+    for (const card of cards) {
+      const row = card.action === 'update' ? this.#store.update(userId, card) : this.#store.insert(userId, card)
+      if (row?.id) written.push(row.id)
+    }
+    // 轻量维护（DESIGN-memory-lifecycle §4.6，无 LLM 调用、不阻塞回复）：
+    //   ① 对本轮写入的卡片即时评分（时间衰减/独特性因子的入口）
+    //   ② todo 过期/老化 → 归档（不物理删除，可回滚）
+    try { this.#scoreWritten(userId, written) } catch (e) { /* 评分失败不影响记忆写入 */ }
+    try { pruneTodos(this.#store, userId, this.#now().getTime()) } catch (e) { /* 清理失败同样不影响写入 */ }
     return cards.length
+  }
+
+  /** 只给本轮写入的卡片评分（全量重算留给重量维护，避免每轮 O(n²) 相似度比对）。 */
+  #scoreWritten(userId, ids) {
+    const unique = [...new Set((ids || []).filter(Boolean))]
+    if (!unique.length) return 0
+    const now = this.#now().getTime()
+    const siblings = this.#store.listActive(userId)
+    const gramsById = new Map(siblings.map((c) => [c.id, ngrams(c.content)]))
+    let scored = 0
+    for (const id of unique) {
+      const card = this.#store.get(userId, id)
+      if (!card || card.status !== 'active') continue
+      const { importance } = scoreCard(card, { now, siblings, gramsById })
+      this.#store.setImportance(userId, id, importance)
+      scored++
+    }
+    return scored
   }
   nowLine() { return beijingNowLine(this.#now().getTime()) }
 }

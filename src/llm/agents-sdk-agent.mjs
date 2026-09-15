@@ -9,6 +9,7 @@ import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
 import { buildUseSkillTool } from '../tools/misc-tools.mjs'
 import { wrapClientForDeepSeek } from './deepseek-thinking-client.mjs'
 import { buildGapLine } from './conversation-pace.mjs'
+import { createMemoryComplete } from './memory-complete.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -19,6 +20,7 @@ export class AgentsSdkAgent {
   #staticTools
   #makeAgent
   #resetThinking
+  #memoryComplete
 
   constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillRegistry = null }) {
     // DeepSeek thinking-mode compat: the model runs on a wrapped client that
@@ -29,6 +31,9 @@ export class AgentsSdkAgent {
     const { client: modelClient, reset: resetThinking } = wrapClientForDeepSeek(rawClient)
     this.#resetThinking = resetThinking
     this.#llm = rawClient
+    // 记忆/摘要调用统一关闭思考（理由与实测见 memory-complete.mjs）：既能避免"思考吃掉
+    // max_tokens → 空响应"，也省约 10 倍 token。主对话仍走带思考的包装 client。
+    this.#memoryComplete = createMemoryComplete(rawClient, { model: process.env.OPENAI_MODEL || model })
     const sdkModel = new OpenAIChatCompletionsModel(modelClient, model)
     this.#skillRegistry = skillRegistry
     // Agent is a stateless definition; build one per call so tools can carry
@@ -45,14 +50,12 @@ export class AgentsSdkAgent {
 
   async #summarize(turns) {
     try {
-      const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-flash', messages: [{ role: 'user', content: buildSummarizePrompt(turns) }], temperature: 0, max_tokens: 800 })
-      return (resp.choices?.[0]?.message?.content || '').trim()
+      return await this.#memoryComplete([{ role: 'user', content: buildSummarizePrompt(turns) }], { temperature: 0, maxTokens: 800 })
     } catch (e) { return '' }
   }
 
   async #complete(messages, { temperature = 0, maxTokens = 600 } = {}) {
-    const resp = await this.#llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-flash', messages, temperature, max_tokens: maxTokens })
-    return (resp.choices?.[0]?.message?.content || '').trim()
+    return this.#memoryComplete(messages, { temperature, maxTokens })
   }
 
   async respond({ userId, text, profile, channel = null, attachments = [] }) {

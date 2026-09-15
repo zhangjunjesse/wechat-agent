@@ -15,6 +15,11 @@ import { DownloadTokenStore } from './services/download-tokens.mjs'
 import { TaskStore } from './services/task-store.mjs'
 import { ContextTokenCache } from './services/context-token-cache.mjs'
 import { TaskScheduler } from './services/task-scheduler.mjs'
+import { MemoryMaintenance } from './services/memory-maintenance.mjs'
+import { MemoryClusterer } from './llm/memory-cluster.mjs'
+import { MemoryGeneralizer } from './llm/memory-generalize.mjs'
+import { MemoryProfiler } from './llm/memory-profile.mjs'
+import { createMemoryComplete } from './llm/memory-complete.mjs'
 import { buildTools } from './tools/index.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
@@ -42,13 +47,24 @@ if (fs.existsSync(globalTasksFile)) {
 
 // MemoryManager needs an extractor that talks to the same LLM the agent uses.
 const llm = new (await import('openai')).default({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' })
+/** 记忆侧统一 LLM 入口（提取/聚类/泛化/档案）：单轮、确定性、**关闭思考**——
+ *  deepseek-flash 的思考会吃掉 max_tokens 导致空响应（详见 memory-complete.mjs）。 */
+const memoryComplete = createMemoryComplete(llm, { model: process.env.OPENAI_MODEL || 'deepseek-flash' })
 const memoryManager = new MemoryManager({
   store: memoryStore,
-  extractor: new MemoryExtractor({ complete: async (messages, opts = {}) => {
-    const r = await llm.chat.completions.create({ model: process.env.OPENAI_MODEL || 'deepseek-flash', messages, temperature: opts.temperature ?? 0, max_tokens: opts.maxTokens ?? 600 })
-    return (r.choices?.[0]?.message?.content || '').trim()
-  } }),
+  extractor: new MemoryExtractor({ complete: memoryComplete }),
 })
+
+// 记忆维护（DESIGN-memory-lifecycle：三层压缩 + 档案层）：tick 每 6h 检查，
+// 活跃用户 ≥24h、不活跃用户 ≥7 天跑一次重量维护。MEMORY_MAINTENANCE=0 可关闭。
+const memoryMaintenance = process.env.MEMORY_MAINTENANCE === '0' ? null : new MemoryMaintenance({
+  store: memoryStore,
+  clusterer: new MemoryClusterer({ complete: memoryComplete }),
+  generalizer: new MemoryGeneralizer({ complete: memoryComplete }),
+  profiler: new MemoryProfiler({ complete: memoryComplete }),
+  onError: (error, userId) => console.warn(`memory maintenance error (${userId}): ${error?.message || error}`),
+})
+memoryMaintenance?.start()
 
 // Read-only direct SQLite access to the WeChat sync receiver's DB (mounted
 // read-only into this container — see ADR-0007). Optional: omitted when not
@@ -83,5 +99,5 @@ const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
 console.log(`wechat-agent listening on http://${host}:${port}`)
-process.on('SIGTERM', () => { scheduler?.stop(); contextTokens.flush(); process.exit(0) })
-process.on('SIGINT', () => { scheduler?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGTERM', () => { scheduler?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGINT', () => { scheduler?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })

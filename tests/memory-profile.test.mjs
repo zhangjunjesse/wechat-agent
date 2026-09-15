@@ -8,7 +8,7 @@ import { MemoryStore } from '../src/services/memory-store.mjs'
 import { MemoryManager, PROFILE_TOKEN_BUDGET, TODO_RECALL_LIMIT } from '../src/llm/memory-manager.mjs'
 import { MemoryExtractor } from '../src/llm/memory-extractor.mjs'
 import {
-  MemoryProfiler, buildProfilePrompt, parseProfileResult, PROFILE_SECTIONS, MIN_PROFILE_CARDS,
+  MemoryProfiler, buildProfilePrompt, parseProfileResult, PROFILE_SECTIONS, PROFILE_MAX_CHARS, MIN_PROFILE_CARDS,
 } from '../src/llm/memory-profile.mjs'
 
 const NOW = Date.now()
@@ -36,7 +36,7 @@ test('parseProfileResult keeps the four sections, fills missing ones, and clips 
   assert.match(parsed, /信格科技/)
   assert.match(parsed, /【近期动态】\n（暂无）/)          // 缺失段补「（暂无）」
   const long = parseProfileResult(`【工作背景】\n${'内容'.repeat(2000)}`)
-  assert.ok(long.length <= 801, `超长档案应被截断，实际 ${long.length}`)
+  assert.ok(long.length <= PROFILE_MAX_CHARS + 1, `超长档案应截断到约 ${PROFILE_MAX_CHARS} 字，实际 ${long.length}`)
   assert.equal(parseProfileResult('没有分段标题的一段话'), null)
   assert.equal(parseProfileResult(''), null)
 })
@@ -89,10 +89,26 @@ test('generate refuses too few cards and unparsable output, and survives LLM err
 
     for (let i = 0; i < MIN_PROFILE_CARDS; i++) store.insert('u1', { category: 'fact', content: `事实条目${i}` })
     const unparsable = new MemoryProfiler({ complete: async () => '随便一段没有分段的话' })
-    assert.equal((await unparsable.generate(store, 'u1', NOW)).reason, 'unparsable output')
+    assert.match((await unparsable.generate(store, 'u1', NOW)).reason, /unparsable output/)
     const failing = new MemoryProfiler({ complete: async () => { throw new Error('boom') } })
     assert.match((await failing.generate(store, 'u1', NOW)).reason, /llm error/)
     assert.equal(store.getProfile('u1'), null)
+  } finally { cleanup(file) }
+})
+
+test('generate retries once when the model returns an empty/unparsable response', async () => {
+  const file = tmpFile()
+  try {
+    const store = new MemoryStore({ file })
+    for (let i = 0; i < MIN_PROFILE_CARDS; i++) store.insert('u1', { category: 'fact', content: `事实条目${i}` })
+    let calls = 0
+    // deepseek-flash 思考模式偶发返回空 content：第一次空、第二次正常 → 必须重试成功
+    const flaky = new MemoryProfiler({ complete: async () => { calls++; return calls === 1 ? '' : PROFILE_TEXT } })
+    const out = await flaky.generate(store, 'u1', NOW)
+    assert.equal(out.ok, true)
+    assert.equal(calls, 2)
+    assert.equal(out.attempts, 2)
+    assert.equal(store.getProfile('u1').content, PROFILE_TEXT)
   } finally { cleanup(file) }
 })
 

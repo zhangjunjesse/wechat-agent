@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **192/192 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **249/249 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -21,7 +21,7 @@
   （把 `channel`/`userId` 透传给工具）；多租户（web + iLink 统一 tenant key）。
 - 能力：记忆（MEMORY-SPEC.md）、会话压缩、沙箱 run_code、文件读写、聊天记录搜索
   skill、渐进式动态技能系统、二进制文档生成、文件/图片/视频发送、公众号调研。
-- 决策记录：`docs/ADR-0001` ~ `ADR-0015`，新增决策前先读 spec-loop 约定。
+- 决策记录：`docs/ADR-0001` ~ `ADR-0016`，新增决策前先读 spec-loop 约定。
 
 ## 记忆系统 v2（DESIGN-memory-lifecycle.md：三层压缩 + 档案层）
 
@@ -76,8 +76,27 @@
     分节行为（灰度/回滚安全）。
   - 实施期修正：**档案独立于卡片**——active 卡片为空但档案存在时仍注入档案（原实现直接
     返回空串，会把档案丢掉）。
-- **待办**：P5 `memory-maintenance` 编排（轻量每轮 / 重量每日：活跃 24h + 不活跃 7 天兜底）
-  + server.mjs 接线 + Z.俊 真实数据端到端回放 + ADR-0016 收敛。
+- **P5 已完成 → 记忆系统 v2 全部落地（ADR-0016 Accepted）**（249/249 全绿）：
+  - `memory-maintenance`：轻量路径挂 `absorb()`（本轮评分 + todo 归档 + 脏标记，无 LLM）；
+    重量路径 tick 每 6h → **活跃 24h / 不活跃 7 天兜底** → 评分刷新 → 归档 → 聚类 → 泛化 →
+    档案重建；单用户串行（`#running`）、步骤间失败隔离、结果写 `memory_maintenance.last_result`。
+  - `server.mjs` 接线（`MEMORY_MAINTENANCE=0` 可关）；`SIGTERM/SIGINT` 停维护器。
+  - **真实数据端到端回放**（线上 `memories.db` 副本，不碰生产数据）：19 条 → 评分 19 /
+    归档 0 / 合并 0 / 泛化 0 / **档案 978 字四段齐全**（`profile: ok`）。0 动作是正确的
+    「宁缺毋滥」——Z.俊 那 13 条非 todo 卡片主题各异，确无重复可合。
+  - **已部署**：2026-09-15 部署到 `datadefender.cn/wechat-agent`（旧版备份
+    `/opt/wechat-agent/app.bak-20260915-memv2`）。
+- **⚠️ 关键运维发现（记忆侧 LLM 必须关闭思考）**：`deepseek-flash` **默认思考模式且思考计入
+  `max_tokens`**——真实长 prompt（19 条记忆）一次思考消耗 **1600-1800 tokens**，`max_tokens`
+  不足时返回 `finish_reason=length` 且 **content 为空**（表面症状："档案 unparsable"、
+  "提取什么都没提取到"，极易误判为 prompt 问题）。顶层参数 **`reasoning_effort: 'none'`
+  确实关闭思考**（实测 reasoning 261 → 0、completion 24 tokens，省约 10 倍；`extra_body` 里的
+  `chat_template_kwargs` / `thinking` / `reasoning_effort` **均无效**）。记忆侧所有调用已统一走
+  `src/llm/memory-complete.mjs`（关思考 + 网关不认该参数时自动回退），主对话保留思考能力。
+- **后续可调优（非决策变更，参数即可）**：评分权重/半衰期、归档阈值 0.30、todo 7/15 天、
+  维护 24h/7 天、档案 1100 字——全部集中为常量 + env 可覆盖，按真实使用反馈微调。
+- **仍待用户实测**：iLink 真实对话下的长期行为（记忆是否被过度归档、泛化产出质量随时间的
+  变化）；Z.俊 存量垃圾 todo（8/25 那批）会在其下次对话时由 pruner 自动归档。
 
 ## 技能系统（ADR-0005/0006/0013，渐进式动态管理）
 

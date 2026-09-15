@@ -1,6 +1,8 @@
 # DESIGN：记忆系统 v2——三层压缩 + 档案层（完整落实 MEMORY-SPEC）
 
-- 状态：**Working proposal**（待评审 → 分阶段实施 → 收敛为稳定决策 ADR-0016）
+- 状态：**已实现 → 稳定决策见 [ADR-0016](ADR-0016-memory-v2-three-tier.md)**（2026-09-15：
+  P0–P5 全部落地、`npm test` 249/249 全绿、线上真实数据副本回放通过、已部署；本文保留设计与
+  实施期修正记录）
 - 关联：`MEMORY-SPEC.md`（权威规格）、ADR-0003（提示词分层）、ADR-0015（会话时间感知）；
   实现面：`memory-store` / `memory-manager` / `memory-extractor` / `agents-sdk-agent` / `server.mjs`
 - 日期：2026-09-14
