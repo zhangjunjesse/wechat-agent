@@ -45,6 +45,18 @@ export function wrapClientForDeepSeek(client) {
         rc.push(msg.reasoning_content)
       }
       return res
+    }).catch((err) => {
+      // 现场诊断（生产实测 400 reasoning_content，定位请求结构差异用）
+      if (String(err?.message || '').includes('reasoning_content')) {
+        const summary = (body?.messages || []).map((m) => {
+          const tag = m?.role === 'assistant'
+            ? `${m.tool_calls ? '[tc]' : ''}${'reasoning_content' in m ? '[rc]' : '[no-rc]'}${m.content == null ? '[null]' : `[${String(m.content).length}ch]`}`
+            : ''
+          return `${m?.role}${tag}`
+        }).join(' , ')
+        console.error(`[thinking-400] rc_len=${rc.length} msg_count=${body?.messages?.length || 0}\n  ${summary}`)
+      }
+      throw err
     })
   }
 

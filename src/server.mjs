@@ -25,6 +25,7 @@ import { renderPoster } from './services/poster-render.mjs'
 import { buildTools } from './tools/index.mjs'
 import { LarkTokenStore } from './services/lark-token-store.mjs'
 import { LarkClient } from './services/lark-client.mjs'
+import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -120,10 +121,22 @@ const posterRender = async (report, html) => {
 const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender }) : null
 scheduler?.start()
 
+// 群命令监听（群聊入口：收走 wechat-sync，发走 iLink 私聊）。
+// 依赖 WECHAT_LOG_DB（wechat-sync 只读挂载）+ agent，缺失时休眠。
+const groupWatcher = wechatLogStore && agent && process.env.WECHAT_LOG_DB
+  ? new GroupCommandWatcher({
+      dbFile: process.env.WECHAT_LOG_DB,
+      agent, provider, profileStore, contextTokens,
+      cursorFile: process.env.GROUP_WATCHER_CURSOR || 'data/group-watcher-cursor.json',
+      onError: (error, row) => console.warn(`group command error (${row?.msg_id || '?'}): ${error?.message || error}`),
+    })
+  : null
+groupWatcher?.start()
+
 const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
 console.log(`wechat-agent listening on http://${host}:${port}`)
-process.on('SIGTERM', () => { scheduler?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
-process.on('SIGINT', () => { scheduler?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGTERM', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGINT', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })

@@ -95,8 +95,14 @@ export class ILinkProvider {
     if (!session) throw new Error('bound session not available')
     const response = await this.#post(session, 'ilink/bot/getupdates', { get_updates_buf: session.cursor || '' }, 35_000)
     if (response.get_updates_buf) session.cursor = response.get_updates_buf
+    // 诊断（群聊支持开发期）：打印原始消息结构，定位群消息/引用/@ 的真实字段
+    const rawMsgs = response.msgs || []
+    if (rawMsgs.length) {
+      const sample = rawMsgs.slice(0, 2).map((m) => JSON.stringify(m).slice(0, 600))
+      console.error(`[ilink-raw] ${providerBotId} got ${rawMsgs.length} msgs:\n  ${sample.join('\n  ')}`)
+    }
     const events = []
-    for (const message of (response.msgs || []).filter((m) => m.message_type === 1)) {
+    for (const message of (rawMsgs).filter((m) => m.message_type === 1)) {
       if (!message.from_user_id) continue
       const event = await this.#normalizeInboundMessage(session, message)
       if (event.text || event.attachments.length) events.push(event)

@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **289/289 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **298/298 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -184,6 +184,16 @@
   （工具不注册、路由 404、行为零变化）；配好即用，需飞书后台配回调
   `https://datadefender.cn/wechat-agent/lark/auth/callback`。
 - 决策：`docs/ADR-0021-lark-docs.md`。
+
+## 微信群命令入口（ADR-0022，收走 wechat-sync / 发走 iLink 私聊）
+
+- iLink bot 收不到群消息（实测），但公网 wechat-sync 实时收集用户所在群的聊天记录
+  （含引用消息完整内容 `attachment.kind=quote → quoted_text`）。
+- `GroupCommandWatcher` 轮询 sync 库「@助手 的新消息」：按 sender 匹配已验证档案
+  （选有私聊通道的那个）→ 解析引用 → 构造入站提示（场景+引用+指令+出处+能力提示）→
+  agent 处理（userId = profile.ilinkUserId，**与私聊同一会话键**）→ iLink 私聊推送。
+- 只响应 @助手 + 已绑定用户；msg_id 去重 + ts 游标落盘；首次启动不追溯历史。
+- 生产实测：群引用飞书链接 @助手 → 私聊收到回复 ✓。决策：`docs/ADR-0022-group-commands.md`。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
   `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线

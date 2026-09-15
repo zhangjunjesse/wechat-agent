@@ -35,6 +35,11 @@ export class ProfileStore {
     const userId = this.#byIlink.get(String(ilinkUserId))
     return userId ? structuredClone(this.#records.get(userId) || null) : null
   }
+  /** 全部档案（群命令监听器等按 sender 匹配身份用）。 */
+  async list() {
+    await this.#ready
+    return [...this.#records.values()].map((r) => structuredClone(r))
+  }
   /** Resolve any key (browser id or providerUserId) to the stable tenant key
    * (providerUserId). Falls back to the input when no ilinkUserId is known
    * (e.g. unverified user). */
