@@ -50,9 +50,16 @@
      否则 `CREATE TABLE IF NOT EXISTS` 阶段直接 `no such column: status` 启动失败。
   2. 评分阈值/权重必须做「可达性推导」，否则规则静默失效（已加参数回归守卫测试）。
   3. 测试涉及时间的用例一律以 `Date.now()` 为基准做相对偏移，硬编码日期会在 7/15 天边界假失败。
-- **待办**：P2 `memory-cluster`（规则预聚 + LLM 合并 + 数字/专名校验）→ P3 `memory-generalize`
-  → P4 `memory-profile` + recall 分层 → P5 `memory-maintenance` 编排 + server 接线 +
-  Z.俊 真实数据端到端回放 + ADR-0016 收敛。
+- **P2 已完成**（223/223 全绿）：
+  - `memory-cluster`：**种子扩张聚类**（与种子 Jaccard ≥0.35 且簇内平均 ≥0.30，簇上限 12）
+    ——刻意不用连通分量（会在 `subject='用户'` 下因传递性连成巨型簇）；LLM 打包判定
+    （`<group>` 分隔，PACK_MAX 6 组/批）；**三重安全网**：cardIds 必须落在同一预聚簇 +
+    信息保留校验（日期归一化 / 数字 / 字母词 / 跨卡共享 3-4 字中文实体覆盖率 ≥50%）+
+    合并只标记不动原文；幂等（原卡 merged 后自动退出候选）。
+  - 实施期修正：原设计的「≥3 字中文串 + 覆盖率 80%」实测两处都不对（整串会因改写失配；
+    2 字片段会把「需要」当实体导致抖动）→ 改 3-4 字片段 + 通用字过滤 + 阈值 0.5。
+- **待办**：P3 `memory-generalize` → P4 `memory-profile` + recall 分层
+  → P5 `memory-maintenance` 编排 + server 接线 + Z.俊 真实数据端到端回放 + ADR-0016 收敛。
 
 ## 技能系统（ADR-0005/0006/0013，渐进式动态管理）
 
