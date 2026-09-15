@@ -73,9 +73,15 @@ export function parseReportJson(text) {
     if (items.length >= MAX_ITEMS) break
   }
   if (!items.length) return { ok: false }
-  const focus = typeof obj.focus === 'string' ? obj.focus.trim() : ''
+  const focus = normalizeFocus(typeof obj.focus === 'string' ? obj.focus : '')
   const cover = typeof obj.cover === 'string' ? obj.cover.trim() : ''
   return { ok: true, focus, cover, items }
+}
+
+/** focus 归一化：agent 偶发把 schema 提示词「今日关注点一句话」带进值（如
+ * 「今日关注点：智谱…」），渲染层统一去掉该前缀，避免「今日关注：今日关注点：…」。 */
+export function normalizeFocus(focus) {
+  return String(focus || '').trim().replace(/^今日关注点[:：]?/, '').trim()
 }
 
 /** 机械去重：指纹命中近 7 天集合的条目删除；删后不足 3 条则保留原样（不可空报）。 */

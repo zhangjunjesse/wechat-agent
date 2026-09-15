@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **270/270 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **271/271 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -160,6 +160,20 @@
 - 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可
   「第 N 条展开讲讲」（配 `gzh_content` 抓原文）。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md`。
+- **已部署 + 实测**（2026-09-15）：生产 `datadefender.cn/wechat-agent` 已上线本管道
+  （源码挂载 `/opt/wechat-agent/app`，`docker restart` 生效，env 零改动——容器 WORKDIR=/
+  使默认 `data/xxx` 恰好落在 /data 持久卷）。重启后回拨 `last_run_at` 强制补跑当天一轮：
+  - 报告 `rp-0edff76a-20260915` 生成成功：**7 条 AI/科技要闻**（智谱 50 亿美元融资、
+    AI+脑机接口标准、台积电 CPO、俄罗斯光刻机、DeepSeek Harness、Sam Altman、
+    书生 Intern-S2），每条带公众号来源 + 微信原文链接；
+  - **封面图经 image-studio 技能生成**（`/data/user-files/task-global-每日早报/images/…`，
+    1.8MB PNG），微信先发封面再发正文；
+  - 公网页 `https://datadefender.cn/wechat-agent/reports/<id>` HTTP 200（7 条全部带
+    原文链接）+ `/cover` HTTP 200 image/png；
+  - **推送成功**（`lastError` 为空）——此前旧版本同日推送报 `402 Insufficient Balance`
+    （iLink 侧余额不足），本次未复现。
+  - 实测发现的文案瑕疵：agent 把 schema 提示词「今日关注点：」带进 focus 值 →
+    已加 `normalizeFocus` 渲染层去前缀（271/271 全绿），同步到生产，明天 08:00 轮生效。
 
 ## 会话时间感知（ADR-0015）
 

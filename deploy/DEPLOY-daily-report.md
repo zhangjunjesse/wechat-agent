@@ -5,6 +5,26 @@
 > 源码包：`deploy/wechat-agent-0.1.0.tgz`（`npm pack` 现打，含全部新文件，无 node_modules、
 > 无 data/ 敏感数据；服务器侧依赖不动——本版本零新 npm 依赖）。
 
+## ✅ 部署记录（2026-09-15 已完成，含实测）
+
+- 方式：容器 `node:22-bookworm-slim` 直接**挂载源码** `/opt/wechat-agent/app -> /app`
+  （CMD `node /app/src/server.mjs`，WORKDIR=`/`）。部署 = 换 `app/` 源码 + `docker restart`，
+  **env 零改动**：WORKDIR=`/` 使默认相对路径 `data/reports.db` / `data/tasks.db` /
+  `data/user-files` 恰好落在持久卷 `/data`（挂载 `/opt/wechat-agent/data -> /data`）。
+- 步骤：备份 `app` → `app.bak-20260916-report` → 上传 tgz → 解包 + `rsync -a --delete
+  --exclude node_modules` 同步（清掉残留 `tmp-probe.mjs`，保留服务器 node_modules）→
+  把「每日早报」`last_run_at` 回拨一天强制补跑当天轮 → `docker restart`。
+- 实测结果：报告 `rp-0edff76a-20260915` 生成 **7 条 AI/科技要闻**（带公众号来源 +
+  微信原文链接）；**封面图经 image-studio 技能生成**（1.8MB PNG）；公网页
+  `/reports/<id>` 与 `/cover` 均 HTTP 200；微信推送成功（`lastError` 为空，旧版同日
+  曾报 `402 Insufficient Balance` 未复现）。
+- 部署后发现 focus 值被模型带上 schema 提示词前缀 → 已加 `normalizeFocus` 渲染层去前缀
+  （271/271 全绿）并同步生产，次日轮生效。
+
+> ⚠️ 若将来把容器 WORKDIR 改成 /app 或改用构建镜像，则 `data/xxx` 相对路径会落到
+> 容器层——届时必须显式设置 `REPORTS_FILE=/data/reports.db`、`TASKS_FILE=/data/tasks.db`、
+> `USER_FILES_ROOT=/data/user-files` 等。
+
 ## 0. 部署前检查（服务器上）
 
 ```bash
@@ -12,10 +32,10 @@ cd /opt/wechat-agent
 cat server.env          # 确认以下三项：
 ```
 
-| 变量 | 要求 | 缺失后果 |
+| 变量 | 要求 | 说明 |
 |---|---|---|
-| `REPORTS_FILE` | **必须新增** `/data/reports.db` | 报告库写进容器临时层，重建容器即丢；公网页 404 |
-| `USER_FILES_ROOT` | 应为 `/data/user-files` | 封面图（技能产物）写容器临时层，重启丢失 |
+| `REPORTS_FILE` | **不需要**（当前挂载式部署下默认即可） | WORKDIR=`/` 时默认 `data/reports.db` 即 `/data/reports.db`（持久卷）；改 WORKDIR 才需显式设置 |
+| `USER_FILES_ROOT` | 默认即可 | 同上，`data/user-files` 落 `/data/user-files`（封面技能产物持久） |
 | `TOAPIS_API_KEY` | 有则封面出图；无则自动纯文字降级 | 不算故障，只是没封面 |
 
 ```bash

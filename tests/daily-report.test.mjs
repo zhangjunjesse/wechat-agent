@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage } from '../src/services/daily-report.mjs'
+import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, normalizeFocus } from '../src/services/daily-report.mjs'
 import { fingerprintOf } from '../src/services/report-store.mjs'
 
 test('buildReportPrompt carries task, dedup list, cover instruction and JSON schema', () => {
@@ -70,6 +70,18 @@ test('dedupeItems drops 7-day duplicates but keeps a floor of 3', () => {
   // 指纹归一化参与比对
   const r5 = dedupeItems([{ title: 'OpenAI 发布新模型！' }, { title: '别的' }, { title: '丙' }, { title: '丁' }], new Set([fingerprintOf('openai发布新模型')]))
   assert.deepEqual(r5.items.map((i) => i.title), ['别的', '丙', '丁'])
+})
+
+test('normalizeFocus strips the schema-hint prefix the model may echo', () => {
+  assert.equal(normalizeFocus('今日关注点：智谱融资'), '智谱融资')
+  assert.equal(normalizeFocus('今日关注点:芯片'), '芯片')
+  assert.equal(normalizeFocus('今日关注点'), '') // 仅前缀
+  assert.equal(normalizeFocus('今日关注'), '今日关注') // 不带「点」不是提示词前缀
+  assert.equal(normalizeFocus(' 直接内容 '), '直接内容')
+  assert.equal(normalizeFocus(''), '')
+  // parseReportJson 也走归一化
+  const r = parseReportJson(JSON.stringify({ focus: '今日关注点：AI新进展', items: [{ title: 'A', summary: 's' }] }))
+  assert.equal(r.focus, 'AI新进展')
 })
 
 test('renderWeChatDigest contains items, focus and report URL', () => {
