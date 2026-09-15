@@ -106,6 +106,9 @@ if (!lark) console.warn('lark docs disabled: set LARK_APP_ID + LARK_APP_SECRET t
 
 const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, lark })
 
+const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
+const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
+
 // 任务委派（DESIGN-task-delegation.md / ADR-0024）：
 // 主 agent 只决策与秒回；长任务交给后台子 agent（独立实例 + 独立 thinking 缓存，
 // 受限工具集：无 delegate/task 工具防递归，保留 send_file/notify_user 与业务工具）。
@@ -129,9 +132,6 @@ if (subagentRunner) {
   const dt = delegateTools({ taskRunStore, runner: subagentRunner, minSeconds: Number(process.env.DELEGATE_MIN_SECONDS || 30) })
   tools.push(dt.delegateTask, dt.listTasks, dt.taskStatus, dt.retryTask)
 }
-
-const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
-const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
 
 // Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
 // Report tasks (DESIGN-daily-report.md + ADR-0018): one generation + fan-out;
