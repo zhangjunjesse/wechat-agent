@@ -10,6 +10,7 @@ import { buildUseSkillTool } from '../tools/misc-tools.mjs'
 import { wrapClientForDeepSeek } from './deepseek-thinking-client.mjs'
 import { buildGapLine } from './conversation-pace.mjs'
 import { createMemoryComplete } from './memory-complete.mjs'
+import { createSerialQueue } from './serial-queue.mjs'
 
 export class AgentsSdkAgent {
   #sessions
@@ -21,6 +22,7 @@ export class AgentsSdkAgent {
   #makeAgent
   #resetThinking
   #memoryComplete
+  #runQueue = createSerialQueue()
 
   constructor({ model, baseUrl = 'https://api.openai.com/v1', apiKey = process.env.OPENAI_API_KEY, sessionStore = null, memoryStore = null, tokenBudget = 128_000, threshold = 0.8, keepTurns = 30, tools = [], skillRegistry = null }) {
     // DeepSeek thinking-mode compat: the model runs on a wrapped client that
@@ -58,7 +60,13 @@ export class AgentsSdkAgent {
     return this.#memoryComplete(messages, { temperature, maxTokens })
   }
 
-  async respond({ userId, text, profile, channel = null, attachments = [], ephemeral = false }) {
+  async respond(args) {
+    // 串行化 agent run：wrapClientForDeepSeek 的 reasoning 缓存假设同一时刻只有一个
+    // run 使用该 client——并发 run 互相 reset 缓存导致 DeepSeek 400（生产实测）。
+    return this.#runQueue(() => this.#doRespond(args))
+  }
+
+  async #doRespond({ userId, text, profile, channel = null, attachments = [], ephemeral = false }) {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
     // ephemeral（定时任务的报告生成等系统侧单轮执行）：不读写该合成用户的
     // session/记忆，零副作用（DESIGN-daily-report.md）——transcript 用空数组。

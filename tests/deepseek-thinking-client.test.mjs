@@ -69,3 +69,24 @@ test('responses without reasoning_content do not extend the cache', async () => 
   const assistant = calls[1].body.messages.find((m) => m.role === 'assistant')
   assert.equal('reasoning_content' in assistant, false)
 })
+
+test('concurrent runs can misalign the shared reasoning cache — must be serialized at the caller', async () => {
+  // 演示：两个 run 并发时，run B 的 reset() 会清掉 run A 尚未消费的缓存，
+  // 导致 run A 下一轮 assistant 消息拿不到 reasoning_content（DeepSeek 400）。
+  // AgentsSdkAgent.respond 已用 createSerialQueue 串行化 run，避免此场景。
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms))
+  const { client, calls } = fakeClient({
+    respond: async () => { await delay(10); return completionWithReasoning(`think-${calls.length}`) },
+  })
+  const { client: wrapped, reset } = wrapClientForDeepSeek(client)
+  reset()
+  // run A turn1 还在飞 → run B 开始（reset 清缓存）→ run A turn2 的 assistant 消息将缺 reasoning
+  const a1 = wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'a1' }] })
+  const bReset = reset()
+  const b1 = wrapped.chat.completions.create({ messages: [{ role: 'user', content: 'b1' }] })
+  const a2 = wrapped.chat.completions.create({ messages: [{ role: 'assistant', content: 'aa', tool_calls: [{ id: 't', type: 'function', function: { name: 'f', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 't', content: 'r' }, { role: 'user', content: 'a2' }] })
+  await Promise.all([a1, bReset, b1, a2])
+  const a2Assistant = calls.find((c) => c.body.messages.some((m) => m.role === 'assistant' && m.content === 'aa'))
+  // 并发下 run A 的 turn2 未拿到缓存注入（'reasoning_content' in m === false）→ 正是 400 根因
+  assert.equal('reasoning_content' in a2Assistant.body.messages.find((m) => m.role === 'assistant'), false)
+})
