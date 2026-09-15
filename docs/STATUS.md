@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **253/253 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **270/270 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -145,6 +145,22 @@
   `ContextTokenCache`（入站消息更新，落盘重启恢复）。无 token/未验证用户跳过。
 - 存储：`data/tasks.db`（SQLite）。
 
+## 日报管道（ADR-0017，报告类公共任务「生成一次、处处发布」）
+
+- 公共任务新增 `kind: 'report'`（默认 `'plain'` 保持旧行为）+ `cover`（封面开关）；
+  `TaskStore` 自动补列迁移，旧库启动不崩。
+- 报告任务执行 = **一次** agent 生成（ephemeral 零副作用执行，合成用户
+  `task-<id>`）→ 结构化 JSON（`focus`/`cover`/`items`）→ 近 7 天指纹机械去重
+  （删后 <3 条保底不删）→ 入库 `data/reports.db`（`ReportStore`，id 按任务+日期
+  幂等）→ 渲染微信摘要（含公网 URL）+ 封面（agent 用 image-studio 技能出图，
+  路径放 JSON.cover）→ 向所有订阅者扇出同一份内容（昵称问候 + 有封面先 sendImage）。
+- 解析失败降级：原始文本直推 + `lastError=report_unparsable`。
+- 公网页：`GET /reports/<id>`（移动优先响应式 HTML，内联 CSS 零依赖）+
+  `GET /reports/<id>/cover`，兼容 `/wechat-agent` 子路径前缀。
+- 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可
+  「第 N 条展开讲讲」（配 `gzh_content` 抓原文）。
+- 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md`。
+
 ## 会话时间感知（ADR-0015）
 
 - 问题：transcript 无时间戳，模型感知不到"距上次对话多久"，隔天对话生硬接续旧话题。
@@ -182,6 +198,9 @@
 - **iLink 真实发送效果需要用户在微信里跟 bot 实测**（协议是逆向的，单测只证明
   字段拼对了）：① 视频是否以原生可播放消息送达 ② 图片是否原生图片消息 ③ 100MB
   上限是否接近真实限制（超大文件可能被服务器拒绝）。
+- **日报管道待上线实测**：部署后验证——① 每日早报 08:00 真实触发一轮（agent 执行 +
+  微信推送 + 公网页 `/reports/<id>` 可访问）② 封面图经 image-studio 技能的出图效果
+  与 sendImage 送达 ③ 连续多天内容去重是否有效。
 - L2 技能仓库同步、技能脚本执行器抽象、用户私有技能上传接口为后续工作。
 - bindings 仍是 JSON 文件存储（`data/bindings.json`），未做加密 + 未迁移真实数据库。
 - 语音消息（VOICE 通道）未实现专门发送，音频走文件附件（用户未要求）。

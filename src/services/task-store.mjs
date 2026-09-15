@@ -27,12 +27,18 @@ export class TaskStore {
         owner_user_id TEXT,
         subscribers   TEXT NOT NULL DEFAULT '[]',
         enabled       INTEGER NOT NULL DEFAULT 1,
+        kind          TEXT NOT NULL DEFAULT 'plain',
+        cover         INTEGER NOT NULL DEFAULT 0,
         created_at    INTEGER NOT NULL DEFAULT 0,
         last_run_at   INTEGER NOT NULL DEFAULT 0,
         last_error    TEXT NOT NULL DEFAULT '',
         UNIQUE(scope, name)
       );
     `)
+    // 迁移：线上旧库没有 kind/cover 列（DESIGN-daily-report.md）——补列后再用。
+    const cols = this.#db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name)
+    if (!cols.includes('kind')) this.#db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'plain'")
+    if (!cols.includes('cover')) this.#db.exec('ALTER TABLE tasks ADD COLUMN cover INTEGER NOT NULL DEFAULT 0')
   }
 
   // ---- user (private) tasks ----
@@ -68,7 +74,7 @@ export class TaskStore {
   }
 
   /** Upsert global tasks from a config array (deploy/global-tasks.json).
-   * Existing subscribers are preserved; schedule/instruction/enabled update.
+   * Existing subscribers are preserved; schedule/instruction/kind/cover update.
    * A record may carry `createdAt` (test/backfill) — defaults to now. */
   loadGlobalTasks(records = []) {
     const now = Date.now()
@@ -76,13 +82,15 @@ export class TaskStore {
       parseSchedule(r.schedule) // validate
       const id = `global-${r.name}`
       this.#db.prepare(`
-        INSERT INTO tasks (id, scope, name, schedule, instruction, enabled, created_at)
-        VALUES (?, 'global', ?, ?, ?, ?, ?)
+        INSERT INTO tasks (id, scope, name, schedule, instruction, enabled, kind, cover, created_at)
+        VALUES (?, 'global', ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           schedule = excluded.schedule,
           instruction = excluded.instruction,
-          enabled = excluded.enabled
-      `).run(id, String(r.name), r.schedule, String(r.instruction || ''), r.enabled !== false ? 1 : 0, Math.floor(r.createdAt || now))
+          enabled = excluded.enabled,
+          kind = excluded.kind,
+          cover = excluded.cover
+      `).run(id, String(r.name), r.schedule, String(r.instruction || ''), r.enabled !== false ? 1 : 0, r.kind === 'report' ? 'report' : 'plain', r.cover ? 1 : 0, Math.floor(r.createdAt || now))
     }
     return this.listGlobalTasks()
   }
@@ -148,6 +156,8 @@ export class TaskStore {
       ownerUserId: row.owner_user_id,
       subscribers: safeJson(row.subscribers, []),
       enabled: Boolean(row.enabled),
+      kind: row.kind || 'plain',
+      cover: Boolean(row.cover),
       createdAt: Number(row.created_at),
       lastRunAt: Number(row.last_run_at),
       lastError: row.last_error || '',

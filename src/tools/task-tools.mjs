@@ -1,11 +1,13 @@
 import { tool } from '@openai/agents'
 import { nextRunAt, describeSchedule } from '../services/schedule.mjs'
+import { beijingParts } from '../services/time.mjs'
 
-/** 定时任务工具集（DESIGN-timed-tasks.md）。
+/** 定时任务工具集（DESIGN-timed-tasks.md + DESIGN-daily-report.md）。
  *
  * 私有任务（create/list/delete）由用户自己管理；公共任务目录 + 订阅/退订
- * 控制全局任务的加入。userId 来自 run context，所有操作只影响本人。 */
-export function taskTools({ taskStore, now = () => Date.now() } = {}) {
+ * 控制全局任务的加入。userId 来自 run context，所有操作只影响本人。
+ * reportStore 可选：提供后注册 get_daily_report（查看/追问报告详情）。 */
+export function taskTools({ taskStore, reportStore = null, now = () => Date.now() } = {}) {
   const createTask = tool({
     name: 'create_task',
     description:
@@ -116,7 +118,55 @@ export function taskTools({ taskStore, now = () => Date.now() } = {}) {
     },
   })
 
-  return { createTask, listMyTasks, deleteTask, listGlobalTasks, subscribeTask, unsubscribeTask }
+  const getDailyReport = tool({
+    name: 'get_daily_report',
+    description:
+      '查看最近一份定时任务报告（如每日早报）的完整条目内容（标题/摘要/来源/原文链接）。' +
+      '用户追问"早报第3条展开讲讲""今天的早报内容"时使用；如需更详细信息可再配合 gzh_content 抓取原文。',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '报告对应的任务名（不填则取该用户已订阅任务的最近一份报告）' },
+      },
+      required: [],
+    },
+    execute: async (input, ctx) => {
+      const userId = ctx?.context?.userId
+      if (!reportStore) return '报告功能未启用。'
+      let report = null
+      if (input.name) {
+        // 只允许查看自己订阅的公共任务 / 自己创建的任务的报告
+        const sub = taskStore.listGlobalTasks().find((t) => t.name === input.name && t.subscribers.includes(userId))
+        const mine = taskStore.listUserTasks(userId).find((t) => t.name === input.name)
+        if (!sub && !mine) return `你未订阅/未创建任务「${input.name}」，无法查看其报告。`
+        const taskId = sub ? `global-${sub.name}` : `user-${userId}-${mine.name}`
+        const list = reportStore.listReports(taskId, 1)
+        report = list.length ? reportStore.getReport(list[0].id) : null
+      } else {
+        // 已订阅的报告类公共任务中取最近一份
+        let best = null
+        for (const t of taskStore.listGlobalTasks()) {
+          if (t.kind !== 'report' || !t.subscribers.includes(userId)) continue
+          const list = reportStore.listReports(`global-${t.name}`, 1)
+          if (list.length && (!best || list[0].runAt > best.runAt)) best = list[0]
+        }
+        report = best ? reportStore.getReport(best.id) : null
+      }
+      if (!report) return '未找到报告。'
+      const p = beijingParts(report.runAt)
+      const date = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
+      const lines = [`📰 ${report.name} · ${date}`]
+      if (report.focus) lines.push(`🎯 今日关注：${report.focus}`)
+      report.items.forEach((it, i) => {
+        lines.push(`${i + 1}. ${it.title}${it.source ? `（${it.source}）` : ''}`)
+        if (it.summary) lines.push(`　${it.summary}`)
+        if (it.url) lines.push(`　原文：${it.url}`)
+      })
+      return lines.join('\n')
+    },
+  })
+
+  return { createTask, listMyTasks, deleteTask, listGlobalTasks, subscribeTask, unsubscribeTask, getDailyReport }
 }
 
 /** 供测试/展示：任务的下次触发时间。 */

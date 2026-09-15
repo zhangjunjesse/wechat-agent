@@ -31,7 +31,7 @@ import { taskTools } from './task-tools.mjs'
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -57,8 +57,9 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     tools.push(manage.manageSkill)
   }
   if (taskStore) {
-    const tasks = taskTools({ taskStore })
+    const tasks = taskTools({ taskStore, reportStore })
     tools.push(tasks.createTask, tasks.listMyTasks, tasks.deleteTask, tasks.listGlobalTasks, tasks.subscribeTask, tasks.unsubscribeTask)
+    if (reportStore) tools.push(tasks.getDailyReport)
   }
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore })

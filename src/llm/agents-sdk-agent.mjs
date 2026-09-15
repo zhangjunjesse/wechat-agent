@@ -58,9 +58,11 @@ export class AgentsSdkAgent {
     return this.#memoryComplete(messages, { temperature, maxTokens })
   }
 
-  async respond({ userId, text, profile, channel = null, attachments = [] }) {
+  async respond({ userId, text, profile, channel = null, attachments = [], ephemeral = false }) {
     if (!profile?.nickname && !profile?.wxid) return { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
-    const session = this.#sessions.get(userId)
+    // ephemeral（定时任务的报告生成等系统侧单轮执行）：不读写该合成用户的
+    // session/记忆，零副作用（DESIGN-daily-report.md）——transcript 用空数组。
+    const session = ephemeral ? { transcript: [], summary: '', updatedAt: 0 } : this.#sessions.get(userId)
     const memories = this.#memory.recall(userId)
     const attachmentText = attachments.length
       ? `\n\n本轮已收到附件：\n${attachments.map((a) => `- ${a.name || '未命名'}（路径：${a.path || '不可用'}，大小：${a.size || '未知'}字节）`).join('\n')}\n附件未被实际工具读取前，不要声称已经看过内容。`
@@ -92,8 +94,9 @@ export class AgentsSdkAgent {
     // more than once while working through one user message.
     // maxTurns: multi-step tool tasks (research, image, report) regularly
     // exceed the SDK default of 10 — make it configurable (AGENT_MAX_TURNS).
-    const result = await run(this.#makeAgent(instructions, tools), [{ role: 'system', content: context + attachmentText }, ...session.transcript, { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments }, maxTurns: Number(process.env.AGENT_MAX_TURNS || 30) })
+    const result = await run(this.#makeAgent(instructions, tools), [{ role: 'system', content: context + attachmentText }, ...(ephemeral ? [] : session.transcript), { role: 'user', content: text }], { context: { userId, profile, loadedSkills: new Set(), channel, attachments }, maxTurns: Number(process.env.AGENT_MAX_TURNS || 30) })
     const answer = typeof result.finalOutput === 'string' ? result.finalOutput : String(result.finalOutput || '')
+    if (ephemeral) return { text: answer } // 不落 session、不折叠、不吸收记忆
 
     let { transcript } = this.#sessions.append(userId, text, answer, attachments)
     if (this.#compactor.needsFold(transcript)) {

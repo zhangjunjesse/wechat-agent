@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { TaskStore } from '../src/services/task-store.mjs'
+import { ReportStore } from '../src/services/report-store.mjs'
 import { taskTools } from '../src/tools/task-tools.mjs'
 
 function call(toolFn, input, ctx) {
@@ -61,5 +62,41 @@ test('global task directory + subscribe/unsubscribe via tools', async () => {
     assert.equal(store.isSubscribed('每日早报', 'u1'), false)
   } finally {
     store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('get_daily_report returns the latest report only for subscribed/owned tasks', async () => {
+  const file = path.join(os.tmpdir(), `tk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const repFile = file + '.rep.db'
+  const store = new TaskStore({ file })
+  const reportStore = new ReportStore({ file: repFile })
+  const tools = taskTools({ taskStore: store, reportStore })
+  const ctx = (userId = 'u1') => ({ context: { userId } })
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    reportStore.saveReport({
+      taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), focus: '关注点X',
+      items: [{ title: 'T1', summary: 'S1', source: '源', url: 'https://a.com' }, { title: 'T2', summary: 'S2' }],
+    })
+    // 未订阅 → 找不到（不泄露他人/全局报告）
+    const notSub = await call(tools.getDailyReport, {}, ctx('u2'))
+    assert.match(notSub, /未找到报告/)
+    const denied = await call(tools.getDailyReport, { name: '每日早报' }, ctx('u2'))
+    assert.match(denied, /未订阅/)
+    // 订阅后可见
+    store.subscribe('每日早报', 'u1')
+    const out = await call(tools.getDailyReport, {}, ctx('u1'))
+    assert.match(out, /T1/)
+    assert.match(out, /S1/)
+    assert.match(out, /https:\/\/a\.com/)
+    assert.match(out, /关注点X/)
+    const out2 = await call(tools.getDailyReport, { name: '每日早报' }, ctx('u1'))
+    assert.match(out2, /T2/)
+    // 无 reportStore 时优雅返回
+    const plain = taskTools({ taskStore: store })
+    const out3 = await call(plain.getDailyReport, {}, ctx('u1'))
+    assert.match(out3, /未启用/)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
   }
 })

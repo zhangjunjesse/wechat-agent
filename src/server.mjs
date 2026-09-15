@@ -13,6 +13,7 @@ import { SkillRegistry } from './skills/skill-registry.mjs'
 import { WechatLogStore } from './services/wechat-log-store.mjs'
 import { DownloadTokenStore } from './services/download-tokens.mjs'
 import { TaskStore } from './services/task-store.mjs'
+import { ReportStore } from './services/report-store.mjs'
 import { ContextTokenCache } from './services/context-token-cache.mjs'
 import { TaskScheduler } from './services/task-scheduler.mjs'
 import { MemoryMaintenance } from './services/memory-maintenance.mjs'
@@ -35,7 +36,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || path.resolve(__dirname, '..', 'skills') })
 
 // Timed tasks (ADR-0014): store + contextToken cache + public task catalog.
+// Report archive (DESIGN-daily-report.md): structured report storage + dedup
+// fingerprints + public web page backing store.
 const taskStore = new TaskStore({ file: process.env.TASKS_FILE || 'data/tasks.db' })
+const reportStore = new ReportStore({ file: process.env.REPORTS_FILE || 'data/reports.db' })
 const contextTokens = new ContextTokenCache({ file: process.env.CONTEXT_TOKENS_FILE || 'data/context-tokens.json' })
 const globalTasksFile = process.env.GLOBAL_TASKS_FILE || path.resolve(__dirname, '..', 'deploy', 'global-tasks.json')
 if (fs.existsSync(globalTasksFile)) {
@@ -85,16 +89,21 @@ process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')
 const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}files/${downloadTokens.issue(userId, relPath)}`
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore })
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
 
 // Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
-const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens }) : null
+// Report tasks (DESIGN-daily-report.md): one generation + fan-out; the web URL
+// uses the public base; the cover image is produced by the agent via the
+// image-studio skill inside the report run (path lands in JSON.cover), so no
+// separate generation path is wired here.
+const reportUrl = (reportId) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}reports/${reportId}`
+const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, reportRoot: userFilesRoot }) : null
 scheduler?.start()
 
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens })
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })

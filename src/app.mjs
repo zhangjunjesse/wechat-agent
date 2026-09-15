@@ -7,8 +7,9 @@ import { PollingService } from './services/polling-service.mjs'
 import { VerificationService } from './services/verification-service.mjs'
 import { resolveUserPath } from './services/user-sandbox.mjs'
 import { renderPage } from './ui-page.mjs'
+import { renderReportPage } from './services/daily-report.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null }) {
   const owned = []
   let polling
   const lastPollLog = new Map() // providerBotId -> { at, error }
@@ -62,6 +63,26 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'POST' && url.pathname === '/api/profile-verifications') { const body = await readJson(req); if (!verification) return json(res, 503, { error: 'verification_not_configured' }); return json(res, 201, verification.create({ userId: assertHeader(req, 'x-user-id'), ilinkUserId: body.ilinkUserId || '' })) }
       const verifyMatch = url.pathname.match(/^\/api\/profile-verifications\/([^/]+)$/)
       if (req.method === 'GET' && verifyMatch) { if (!verification) return json(res, 503, { error: 'verification_not_configured' }); return json(res, 200, await verification.check({ userId: assertHeader(req, 'x-user-id'), id: verifyMatch[1] })) }
+      // 报告公网页（DESIGN-daily-report.md）：GET /reports/<id> 与 /reports/<id>/cover，
+      // 兼容反向代理子路径前缀（同 files 路由）。
+      const reportCoverMatch = url.pathname.match(/^(?:\/wechat-agent)?\/reports\/([^/]+)\/cover$/)
+      if (req.method === 'GET' && reportCoverMatch) {
+        const id = safeDecode(reportCoverMatch[1])
+        const report = reportStore?.getReport(id)
+        if (!report?.coverPath) return json(res, 404, { error: 'cover_not_found' })
+        let data
+        try { data = await fs.readFile(report.coverPath) } catch { return json(res, 404, { error: 'cover_not_found' }) }
+        const ext = path.extname(report.coverPath).toLowerCase()
+        const type = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'application/octet-stream'
+        res.writeHead(200, { 'content-type': type, 'content-length': data.length, 'cache-control': 'public, max-age=600' })
+        return res.end(data)
+      }
+      const reportMatch = url.pathname.match(/^(?:\/wechat-agent)?\/reports\/([^/]+)$/)
+      if (req.method === 'GET' && reportMatch) {
+        const report = reportStore?.getReport(safeDecode(reportMatch[1]))
+        if (!report) return json(res, 404, { error: 'report_not_found' })
+        return html(res, 200, renderReportPage(report))
+      }
       const profileMatch = url.pathname.match(/^\/api\/profiles\/([^/]+)$/)
       if (req.method === 'GET' && profileMatch) return json(res, 200, { profile: await profileStore?.get(assertHeader(req, 'x-user-id')) })
       if (req.method === 'POST' && url.pathname === '/api/chat') { const body = await readJson(req); const browserId = assertHeader(req, 'x-user-id'); const text = String(body.text || '').trim(); if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' }); const profile = await profileStore?.get(browserId); if (process.env.NODE_ENV === 'production' && !profile?.nickname && !profile?.wxid) return json(res, 403, { error: 'verification_required', message: '请先完成身份验证。' }); const userId = await profileStore?.stableKey(browserId); const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
@@ -80,6 +101,7 @@ function html(res, status, body) { res.writeHead(status, { 'content-type': 'text
 function binary(res, status, contentType, body) { res.writeHead(status, { 'content-type': contentType, 'content-length': body.length, 'cache-control': 'private, max-age=300' }); res.end(body) }
 const CONTENT_TYPES = { '.csv': 'text/csv; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.html': 'text/html; charset=utf-8', '.json': 'application/json; charset=utf-8' }
 function guessContentType(filename) { return CONTENT_TYPES[path.extname(filename).toLowerCase()] || 'application/octet-stream' }
+function safeDecode(s) { try { return decodeURIComponent(s) } catch { return s } }
 function page() { const basePath = process.env.PUBLIC_BASE_PATH || '/'; return `<!doctype html><meta charset="utf-8"><base href="${basePath}"><title>微信个人助手</title><style>body{font:16px system-ui;max-width:680px;margin:30px auto;padding:0 16px}input,button{font:16px;padding:9px;margin:4px 0}#qr{max-width:360px;display:block;margin-top:20px}#status{white-space:pre-wrap;color:#555}.verify{margin-top:22px;border-top:1px solid #ddd;padding-top:18px}.code{white-space:pre-wrap;background:#fff7ed;border:2px solid #f97316;padding:16px;font-size:24px;font-weight:700;color:#9a3412}.chat{border-top:1px solid #ddd;margin-top:22px;padding-top:18px}.log{min-height:100px;border:1px solid #ddd;padding:10px;margin-bottom:8px}</style><h1>微信个人助手</h1><p>先绑定 Bot，再验证微信昵称，验证通过后才能使用助手。</p><input id="user" placeholder="用户标识" value="test-user"><button id="start">获取 Bot 绑定二维码</button><div id="status"></div><img id="qr" alt="Bot 绑定二维码"><section id="verify" class="verify" style="display:none"><h2>第二步：验证微信身份</h2><p>请扫描二维码添加微信联系人 <b>助手</b>，然后向助手发送下方 6 位数字验证码。</p><img src="assistant-qr.jpg?v=2" alt="助手微信二维码" style="width:320px;background:#fff" onerror="this.style.display='none';document.getElementById('qrError').style.display='block'"><div id="qrError" style="display:none;color:#b42318">助手二维码暂时无法加载，请联系管理员。</div><p id="verifyHint" class="code">正在生成验证码…</p></section><section id="chat" class="chat" style="display:none"><h2>验证成功</h2><p>微信 Bot 已完成绑定和身份核验。请直接回到微信与 Bot 对话。</p></section><script>
 const $=id=>document.getElementById(id);let bindingTimer=null,verificationTimer=null,verificationId=null;
 async function checkVerification(user){if(!verificationId)return;const r=await fetch('api/profile-verifications/'+verificationId,{headers:{'x-user-id':user}});if(!r.ok)return;const x=await r.json();if(x.status==='verified'){$('verifyHint').textContent='已核验昵称：'+(x.profile.nickname||'未知')+'\\nwxid：'+x.profile.wxid;$('chat').style.display='block';clearInterval(verificationTimer)}}
