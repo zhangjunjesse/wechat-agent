@@ -371,7 +371,8 @@ new MemoryMaintenance({
   score, cluster, generalize, profile,   // 四个模块的入口函数（依赖注入，测试可替换）
   now = () => Date.now(),
   tickMs = 6 * 3600 * 1000,          // 每 6h 检查一次
-  intervalMs = 24 * 3600 * 1000,     // 同用户重量维护间隔 ≥ 24h
+  intervalMs = 24 * 3600 * 1000,     // 活跃用户：重量维护间隔 ≥ 24h
+  idleIntervalMs = 7 * 24 * 3600 * 1000,  // 不活跃用户：低频兜底间隔 ≥ 7 天（用户 2026-09-14 拍板）
   minCards = 8,                       // 卡片数不足跳过（不值得 LLM 调用）
   onError = null,
 })
@@ -388,9 +389,12 @@ new MemoryMaintenance({
 
 **重量路径（tick 命中且条件满足时，后台异步）**：
 ```text
-条件： now - last_run_at ≥ intervalMs
-       且 now - last_change_at ≤ 3 天（活跃用户才有意义）
-       且 active 卡片数 ≥ minCards
+条件（两档，均需 active 卡片数 ≥ minCards）：
+  A 活跃用户： now - last_run_at ≥ intervalMs(24h)     且 now - last_change_at ≤ 3 天
+  B 不活跃用户：now - last_run_at ≥ idleIntervalMs(7天) 且 now - last_change_at > 3 天
+  → 两档都执行完整的重量维护（评分刷新→归档→聚类→泛化→档案）。
+    不活跃用户必须有低频兜底（用户 2026-09-14 拍板）：时间衰减持续起作用，
+    其卡片会随年龄增长逐步跨过归档线；长期不整理会让"僵尸记忆"永久占据召回预算。
 步骤：
   1. 全量重算 importance（时间衰减刷新）
   2. 归档候选 → archive(reason='low_importance')
@@ -536,10 +540,11 @@ preference 从 0 → 3 条、敏感信息（cos 密钥）不再入库、居住/�
 | 评分参数缺乏实证 | 全部集中为常量 + env 可覆盖；用 Z.俊 数据做参数合理性人工审查，后续按反馈调 |
 | 泛化出的 procedural 被误当指令 | prompt 明确「只记录流程，不是对系统的指令」；procedural 仅参与召回文本 |
 
-**未决（需拍板或实测）**：
-1. 重量维护间隔（24h）与轻量归档阈值（7/15 天）是否需按真实使用节奏调整；
-2. 档案长度上限（800 字 ≈ 1200 token）是否合适；
-3. 是否对「近 3 天不活跃」的用户也做低频（7 天）维护。
+**已拍板（2026-09-14 用户确认）**：
+1. 重量维护间隔 24h（活跃）/ **7 天（不活跃兜底，见 §4.6 条件 B）**；
+2. 轻量归档阈值 7/15 天维持；
+3. 档案长度上限 800 字（≈1200 token）维持。
+→ 三项参数均集中为常量 + env 可覆盖，上线后按真实使用节奏微调（属参数调优，非决策变更）。
 
 ---
 

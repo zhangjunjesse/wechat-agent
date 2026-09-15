@@ -2,6 +2,7 @@ import { MemoryStore } from '../services/memory-store.mjs'
 import { MemoryExtractor } from './memory-extractor.mjs'
 import { estimateTokens } from '../services/tokenizer.mjs'
 import { beijingDateStr, beijingMidnight, beijingNowLine } from '../services/time.mjs'
+import { pruneTodos } from '../services/memory-pruner.mjs'
 
 export class MemoryManager {
   #store; #extractor; #now; #maxRecallTokens
@@ -52,8 +53,11 @@ export class MemoryManager {
   }
   async absorb(userId, userText, assistantText) {
     let cards = []
-    try { cards = await this.#extractor.extract(userText, assistantText, this.#now(), this.#store.list(userId)) } catch (e) { cards = [] }
+    try { cards = await this.#extractor.extract(userText, assistantText, this.#now(), this.#store.listActive(userId)) } catch (e) { cards = [] }
     for (const card of cards) card.action === 'update' ? this.#store.update(userId, card) : this.#store.insert(userId, card)
+    // 轻量维护（DESIGN-memory-lifecycle §4.6）：todo 过期/老化 → 归档（不物理删除）。
+    // 放在 absorb 的异步链里，既不阻塞用户回复，也不引入 LLM 调用。
+    try { pruneTodos(this.#store, userId, this.#now().getTime()) } catch (e) { /* 清理失败不影响本轮记忆写入 */ }
     return cards.length
   }
   nowLine() { return beijingNowLine(this.#now().getTime()) }

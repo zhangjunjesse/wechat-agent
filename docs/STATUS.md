@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **174/174 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **192/192 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -22,6 +22,25 @@
 - 能力：记忆（MEMORY-SPEC.md）、会话压缩、沙箱 run_code、文件读写、聊天记录搜索
   skill、渐进式动态技能系统、二进制文档生成、文件/图片/视频发送、公众号调研。
 - 决策记录：`docs/ADR-0001` ~ `ADR-0015`，新增决策前先读 spec-loop 约定。
+
+## 记忆系统 v2（DESIGN-memory-lifecycle.md：三层压缩 + 档案层）
+
+- **设计已定稿**：完整 proposal（自评审 1 blocker + 8 major 已修订）、13 条验收、P0-P5 分期；
+  参数已拍板（活跃 24h / 不活跃 7 天维护、归档阈值 7/15 天、档案 ≤800 字）。
+- **P0 已完成**（192/192 全绿）：
+  - `buildExtractPrompt` v2：3 天重要性门槛 / episodic 收紧（流水账不提取）/ todo 门槛
+    （明确要求才提）/ 交互偏好引导（结构化回复、要多选项与证据、诚实说明边界）/ 称呼去重 /
+    新增 `emotion`（0-1 情感强度，供第一层评分）。
+  - `memory-store` v2：**逐列迁移**（7 新列）+ 3 新表（`archived_memories` 二级存储 /
+    `memory_profiles` 派生档案 / `memory_maintenance` 脏标记）+ 归档/恢复/合并/档案/访问统计 API。
+  - `memory-pruner`：todo 过期（due 超期 >7 天）与老化（无 due 且 >15 天未更新）→ **归档**
+    （不物理删除，可回滚）；identity/preference/fact 永不自动清理。
+  - `delete_todo` 工具：用户显式删除 → 物理删除（隐私优先），与 pruner 的归档语义区分。
+- **踩坑记录**：老库迁移时 `idx_memories_active`（引用 `status` 新列）必须在补列之后再建，
+  否则 `CREATE TABLE IF NOT EXISTS` 阶段直接 `no such column: status` 启动失败。
+- **待办**：P1 `memory-importance` 评分 → P2 `memory-cluster` → P3 `memory-generalize`
+  → P4 `memory-profile` + recall 分层 → P5 `memory-maintenance` 编排 + server 接线 +
+  Z.俊 真实数据端到端回放 + ADR-0016 收敛。
 
 ## 技能系统（ADR-0005/0006/0013，渐进式动态管理）
 

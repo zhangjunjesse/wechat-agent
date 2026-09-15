@@ -29,3 +29,22 @@ test('buildExtractPrompt asks for episodic/semantic + categories + due', () => {
   assert.match(p, /due/)
   assert.match(p, /2026-08-24/)
 })
+
+test('buildExtractPrompt carries the v2 quality gates (writing-quality P0)', () => {
+  const p = buildExtractPrompt('我习惯先看摘要', '好的', new Date('2026-09-14T04:00:00Z'))
+  assert.match(p, /3 天后/)                 // 重要性门槛：3 天后还有用吗
+  assert.match(p, /流水账/)                 // episodic 收紧：流水账即使发生也不提取
+  assert.match(p, /交互偏好/)               // preference 向交互偏好倾斜
+  assert.match(p, /帮我记着/)               // todo 门槛：明确要求才提取
+  assert.match(p, /emotion/)                // 第一层评分所需的情感强度字段
+  assert.match(p, /update.*覆盖旧信息/)      // 冲突解决语义（提高 update 触发率）
+})
+
+test('parseCards keeps emotion within 0-1, defaults to 0 when absent/unparsable', () => {
+  const cards = parseCards('[{"type":"semantic","category":"fact","content":"A","emotion":0.8},{"type":"semantic","category":"fact","content":"B"},{"type":"semantic","category":"fact","content":"C","emotion":5},{"type":"semantic","category":"fact","content":"D","emotion":"x"}]')
+  assert.equal(cards.length, 4)
+  assert.equal(cards[0].emotion, 0.8)
+  assert.equal(cards[1].emotion, 0)          // 缺失 → 0（评分层按 0.3 中性基线处理）
+  assert.equal(cards[2].emotion, 1)          // 上界截断
+  assert.equal(cards[3].emotion, 0)          // 不可解析
+})
