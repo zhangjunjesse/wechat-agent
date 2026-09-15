@@ -106,54 +106,81 @@ export class TaskScheduler {
     return results
   }
 
-  /** 报告类公共任务：一次 agent 生成 → 去重 → 入库 → 海报渲染 → 扇出。 */
+  /** 报告类公共任务：公共版一次生成（无主题订阅者共享）+ 每个有主题用户单独生成
+   * 个性化版（ADR-0019：per-user 主题，严格隔离），各自渲染海报并推送。 */
   async #runReportTask(task) {
     const now = this.#now()
-    const runUserId = `task-${task.id}` // 合成用户：ephemeral 执行（Windows 安全字符）
-    let rawText = ''
-    let report = null
+    const subscribers = task.subscribers || []
+    const topicsByUser = this.#taskStore.reportTopicsByTask(task.name)
+    const plainUsers = subscribers.filter((u) => !topicsByUser[u]?.length)
+    const results = []
     let fallback = ''
+
+    // ① 公共版：未设主题的订阅者共享一份（生成一次，不随人数翻倍）
+    if (plainUsers.length) {
+      const r = await this.#generateAndStore(task, null, now, [])
+      if (r.ok) {
+        for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
+      } else {
+        fallback = r.error
+        const text = r.rawText || `【定时任务「${task.name}」】生成失败，请稍后重试。`
+        for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, '', text))
+      }
+    }
+
+    // ② 个性化版：每个设了主题的订阅者单独生成（内容贴合自己主题，互不串）
+    for (const userId of subscribers.filter((u) => topicsByUser[u]?.length)) {
+      const r = await this.#generateAndStore(task, userId, now, topicsByUser[userId])
+      if (r.ok) {
+        results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report, topicsByUser[userId])))
+      } else {
+        const text = r.rawText || `【定时任务「${task.name}」】生成失败，请稍后重试。`
+        results.push(await this.#fanoutReport(task, userId, '', text))
+        results.push({ userId: `task-${task.id}-${userId}`, error: r.error }) // 个性化失败可观测
+      }
+    }
+
+    if (fallback) results.push({ userId: `task-${task.id}`, error: fallback }) // 公共版失败可观测
+    return results
+  }
+
+  /** 生成并入库一份报告（userId 为空 = 公共版；非空 = 该用户个性化版）。 */
+  async #generateAndStore(task, userId, now, topics = []) {
+    const runUserId = `task-${task.id}${userId ? `-${userId}` : ''}` // 合成用户：ephemeral 执行
     try {
-      // 近 7 天已报道标题注入 prompt 要求回避
-      const recent = this.#reportStore.recentTitles(task.id, 7, 20)
+      // 近 7 天已报道标题注入 prompt 要求回避（去重窗口按用户维度隔离）
+      const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '' })
       const reply = await this.#agent.respond({
         userId: runUserId,
-        text: buildReportPrompt(task, recent),
+        text: buildReportPrompt(task, recent, { topics }),
         profile: { nickname: task.name, wxid: runUserId },
         channel: null,
         ephemeral: true,
       })
-      rawText = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
+      const rawText = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
       const parsed = parseReportJson(rawText)
-      if (parsed.ok) {
-        // 机械去重（指纹比对近 7 天；删后不足 3 条保底不删）
-        const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7))
-        report = this.#reportStore.saveReport({ taskId: task.id, name: task.name, runAt: now, focus: parsed.focus, rawText, items: deduped.items })
-        // 海报长图（ADR-0018）：HTML → PNG；失败非致命，降级为纯文本短描述
-        if (this.#posterRender) {
-          try {
-            const posterPath = await this.#posterRender(report, renderReportPoster(report))
-            if (posterPath) report = this.#reportStore.saveReport({ ...report, posterPath })
-          } catch { /* poster 失败 → 纯文本降级 */ }
-        }
-      } else {
-        fallback = 'report_unparsable'
+      if (!parsed.ok) return { ok: false, error: 'report_unparsable', rawText }
+      // 机械去重（指纹比对近 7 天；删后不足 3 条保底不删）
+      const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '' }))
+      let report = this.#reportStore.saveReport({ taskId: task.id, name: task.name, runAt: now, focus: parsed.focus, rawText, items: deduped.items, userId: userId || '' })
+      // 海报长图（ADR-0018）：HTML → PNG；失败非致命，降级为纯文本短描述
+      if (this.#posterRender) {
+        try {
+          const posterPath = await this.#posterRender(report, renderReportPoster({ ...report, topics }))
+          if (posterPath) report = this.#reportStore.saveReport({ ...report, posterPath })
+        } catch { /* poster 失败 → 纯文本降级 */ }
       }
+      return { ok: true, report }
     } catch (error) {
-      return [{ userId: runUserId, error: error.message || String(error) }]
+      return { ok: false, error: error.message || String(error), rawText: '' }
     }
-    // 正常：短描述（含公网 URL，供看详情）；解析失败降级：直推 agent 原文（不静默丢失）
-    const reportUrl = report && this.#reportUrl ? this.#reportUrl(report.id) : ''
-    const pushText = report
-      ? `📰 ${report.name} 已送达\n想了解每条详情或回看历史，请访问：\n${reportUrl}\n也可以回复我「第N条展开讲讲」，我帮你细说。`
-      : (rawText || `【定时任务「${task.name}」】生成失败，请稍后重试。`)
-    const results = []
-    for (const userId of task.subscribers || []) {
-      results.push(await this.#fanoutReport(task, userId, report?.posterPath || '', pushText))
-    }
-    // 解析失败也要可观测：lastError 记 report_unparsable（#tick 聚合 error 字段）
-    if (fallback) results.push({ userId: runUserId, error: fallback })
-    return results
+  }
+
+  /** 推送短描述：报告名 + 公网 URL + 主题/订阅引导。 */
+  #pushText(report, topics = []) {
+    const url = this.#reportUrl ? this.#reportUrl(report.id) : ''
+    const topicLine = topics.length ? `当前主题：${topics.join('、')} · ` : ''
+    return `📰 ${report.name} 已送达\n想了解每条详情或回看历史，请访问：\n${url}\n${topicLine}想定制感兴趣的主题？回复「订阅 AI 主题」即可\n也可以回复我「第N条展开讲讲」，我帮你细说。`
   }
 
   /** 向单个订阅者投递：海报长图（原生图片消息）+ 短描述（含公网 URL）。 */

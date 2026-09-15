@@ -219,8 +219,7 @@ test('unparsable report degrades to raw text push and records report_unparsable'
   }
 })
 
-test('poster image is sent before the short text; poster failure degrades to text-only', async () => {
-  const agentOk = { respond: async () => ({ text: REPORT_JSON }) }
+test('poster image is sent before the short text; poster failure degrades to text-only', async () => {  const agentOk = { respond: async () => ({ text: REPORT_JSON }) }
   // 场景 1：posterRender 产出真实文件 → sendImage 先于 sendText，posterPath 入库
   const posterFile = path.join(os.tmpdir(), `poster-${Date.now()}-${Math.random().toString(36).slice(2)}.png`)
   fs.writeFileSync(posterFile, Buffer.from([137, 80, 78, 71]))
@@ -281,5 +280,60 @@ test('poster image is sent before the short text; poster failure degrades to tex
     assert.match(sent3[0].text, /https:\/\/reports\.local\/rp-/)
   } finally {
     s3.store?.close?.(); s3.reportStore?.close?.(); fs.rmSync(s3.file, { force: true }); fs.rmSync(s3.file + '.rep.db', { force: true }); fs.rmSync(s3.root, { recursive: true, force: true })
+  }
+})
+
+test('report topics: per-user personalized runs are isolated and never shared (ADR-0019)', async () => {
+  const calls = []
+  // 按 prompt 内容回不同 JSON（用主题区分，方便断言隔离）
+  const agent = { respond: async (args) => {
+    calls.push(args)
+    const isAI = /个性化主题：AI/.test(args.text)
+    const isRobot = /个性化主题：机器人/.test(args.text)
+    const items = [
+      { title: isAI ? 'AI头条' : isRobot ? '机器人头条' : '公共头条', summary: 's', source: 'src', url: 'https://x.com' },
+      { title: '条目B', summary: 's2', source: 'src2', url: 'https://y.com' },
+      { title: '条目C', summary: 's3', source: 'src3', url: 'https://z.com' },
+    ]
+    return { text: JSON.stringify({ focus: '关注', items }) }
+  } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1', u2: 'tok-2', u3: 'tok-3' } })
+  try {
+    for (const id of ['u1', 'u2', 'u3']) profiles.set(id, { userId: id, nickname: 'u' + id, wxid: 'wx-' + id, ilinkUserId: id })
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'u2')
+    store.subscribe('每日早报', 'u3')
+    // u1 订阅 AI 主题、u2 订阅 机器人 主题、u3 无主题
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
+    store.setReportTopics({ globalName: '每日早报', userId: 'u2', topics: ['机器人'] })
+    await scheduler.sweep()
+    // 生成次数 = 公共版 1 + u1 1 + u2 1 = 3（无主题 u3 共享公共版）
+    assert.equal(calls.length, 3)
+    // prompt 隔离：u1 的 prompt 只含 AI，u2 的只含机器人，公共版两者皆无
+    const u1Prompt = calls.find((c) => c.userId === 'task-global-每日早报-u1').text
+    const u2Prompt = calls.find((c) => c.userId === 'task-global-每日早报-u2').text
+    const sharedPrompt = calls.find((c) => c.userId === 'task-global-每日早报').text
+    assert.match(u1Prompt, /个性化主题：AI/)
+    assert.doesNotMatch(u1Prompt, /个性化主题：机器人/)
+    assert.match(u2Prompt, /个性化主题：机器人/)
+    assert.doesNotMatch(u2Prompt, /个性化主题：AI/)
+    assert.doesNotMatch(sharedPrompt, /个性化主题：/)
+    // 报告按用户维度入库：3 份不同 id 的报告
+    const shared = reportStore.listReports('global-每日早报', 5)
+    const u1Reps = reportStore.listReports('global-每日早报', 5, { userId: 'u1' })
+    const u2Reps = reportStore.listReports('global-每日早报', 5, { userId: 'u2' })
+    assert.equal(shared.length, 1)
+    assert.equal(u1Reps.length, 1)
+    assert.equal(u2Reps.length, 1)
+    assert.equal(reportStore.getReport(u1Reps[0].id).items[0].title, 'AI头条')
+    assert.equal(reportStore.getReport(u2Reps[0].id).items[0].title, '机器人头条')
+    assert.equal(reportStore.getReport(shared[0].id).items[0].title, '公共头条')
+    // 推送隔离：每条短文本都带各自报告的 URL（id 不同 = 不串）
+    assert.equal(sent.length, 3)
+    const urls = sent.map((m) => (/https:\/\/reports\.local\/(rp-[^\n]+)/.exec(m.text) || [])[1])
+    assert.equal(new Set(urls).size, 3)
+    assert.ok(urls.every(Boolean))
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }
 })

@@ -16,9 +16,9 @@ const DEDUP_WINDOW_DAYS = 7
 const MAX_ITEMS = 12
 
 /** 包装任务指令为生成 prompt：日期、范围约束、去重清单、严格 JSON schema。
- * 封面/海报不再由 agent 出图（ADR-0018：HTML 海报渲染，见 renderReportPoster），
- * 所以 prompt 只要求结构化 JSON。 */
-export function buildReportPrompt(task, recentTitles = []) {
+ * `topics`（ADR-0019）：用户订阅的个性化主题，注入后要求优先选这些主题的新闻；
+ * 无主题 = 公共版（范围默认）。 */
+export function buildReportPrompt(task, recentTitles = [], { topics = [] } = {}) {
   const p = beijingParts(Date.now())
   const today = `今天是 ${beijingDateStr()}（周${WEEK[p.weekday]}）。`
   const lines = [
@@ -27,6 +27,9 @@ export function buildReportPrompt(task, recentTitles = []) {
     '资讯范围：以 AI、大模型、芯片、智能硬件等科技领域为主，兼顾当天全网重要的科技与商业新闻。只选择今天或昨天新发布的消息，优先有公众号原文或可信链接的条目。',
     '请挑选 5-8 条最有价值的。',
   ]
+  if (topics.length) {
+    lines.push(`用户订阅的个性化主题：${topics.join('、')}。请优先挑选这些主题相关的重要新闻；若当天该主题没有足够新消息，再补充相近领域。`)
+  }
   if (recentTitles.length) {
     lines.push('近 7 天已报道过（请勿重复选择这些旧闻）：')
     lines.push(recentTitles.slice(0, 20).map((t) => `- ${t}`).join('\n'))
@@ -159,13 +162,20 @@ ${itemsHtml}
 </div></body></html>`
 }
 
-/** 微信推送的海报长图 HTML（ADR-0018：图文一体，纯 CSS 科技风头图，无 AI 图、
- * 无裸 URL——图片没有超链接，完整版地址放在推送的短描述文本里）。
+/** 微信推送的海报长图 HTML（ADR-0018 图文一体 + ADR-0019 主题个性化）。
+ * 纯 CSS 科技风头图、无 AI 图、无裸 URL（完整版地址放推送短描述）。
+ * `report.topics`（可选）：个性化主题徽标（如「AI · 芯片」）替代默认 tag；
+ * 底部含订阅引导（想定制主题 → 回复「订阅 XX 主题」）。
  * 交给 poster-render 渲染成 PNG 后作为原生图片消息发送。 */
 export function renderReportPoster(report) {
   const p = beijingParts(report.runAt)
   const date = `${p.year}.${String(p.month).padStart(2, '0')}.${String(p.day).padStart(2, '0')}`
   const weekday = WEEK[p.weekday]
+  const topics = Array.isArray(report.topics) ? report.topics.filter(Boolean) : []
+  const tag = topics.length ? topics.join(' · ') : 'AI · 科技 · 产业'
+  const hint = topics.length
+    ? `当前主题：${topics.join('、')} · 想调整？回复「订阅 新主题」`
+    : `想定制感兴趣的主题？回复「订阅 AI 主题」，日报会更贴合你`
   const itemsHtml = report.items.map((it, i) => `
   <div class="item"><div class="no">${String(i + 1).padStart(2, '0')}</div><div class="body"><h3>${esc(it.title)}</h3>${it.summary ? `<p>${esc(it.summary)}</p>` : ''}<span class="src">${esc(it.source)}</span></div></div>`).join('')
   const focusHtml = report.focus ? `<div class="focus"><div class="t">今日关注</div><div class="c">${esc(report.focus)}</div></div>` : ''
@@ -197,17 +207,21 @@ body{width:750px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Mic
 .item .src::before{content:"";width:14px;height:14px;border-radius:50%;background:#5b78f0}
 .foot{margin-top:36px;padding-top:26px;border-top:1px solid rgba(255,255,255,.12);text-align:center}
 .foot .hint{font-size:17px;color:#7c86b3;line-height:1.5}
+.foot .guide{margin-top:10px;font-size:17px;color:#8fa4ff;font-weight:650}
 </style></head><body><div class="wrap">
   <div class="hero"><div class="grid"></div><div class="glow"></div><div class="glow2"></div>
     <div class="brand"><span class="logo">早</span>微信个人助手 · ${esc(report.name)}</div>
-    <div class="tag">AI · 科技 · 产业</div>
+    <div class="tag">${esc(tag)}</div>
     <div class="title">${esc(report.name)}</div>
     <div class="date">${date} · 周${weekday}</div>
     <div class="bar"></div>
   </div>
   ${focusHtml}
   ${itemsHtml}
-  <div class="foot"><span class="hint">想深入了解某条？微信里回复「第N条展开讲讲」</span></div>
+  <div class="foot">
+    <div class="hint">想深入了解某条？回复「第N条展开讲讲」</div>
+    <div class="guide">${esc(hint)}</div>
+  </div>
 </div></body></html>`
 }
 

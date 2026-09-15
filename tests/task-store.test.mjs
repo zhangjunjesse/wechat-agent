@@ -116,3 +116,30 @@ test('loadGlobalTasks migrates a legacy table without kind/cover columns', () =>
     store?.close?.(); fs.rmSync(file, { force: true })
   }
 })
+
+test('report topics are per-user isolated and require subscription', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    // 未订阅不能设置主题
+    assert.throws(() => store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] }), /未订阅/)
+    assert.throws(() => store.setReportTopics({ globalName: '不存在', userId: 'u1', topics: ['AI'] }), /不存在/)
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'u2')
+    // u1 设主题，u2 不受影响
+    assert.deepEqual(store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] }), ['AI', '芯片'])
+    assert.deepEqual(store.getReportTopics('每日早报', 'u1'), ['AI', '芯片'])
+    assert.deepEqual(store.getReportTopics('每日早报', 'u2'), []) // 隔离：u2 看不到 u1 的主题
+    // 替代式更新 + 空数组清除
+    assert.deepEqual(store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['新能源'] }), ['新能源'])
+    assert.deepEqual(store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: [] }), [])
+    assert.deepEqual(store.getReportTopics('每日早报', 'u1'), [])
+    // 批量读取（调度器分组用）：只返回设了主题的用户
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
+    store.setReportTopics({ globalName: '每日早报', userId: 'u2', topics: ['机器人'] })
+    assert.deepEqual(store.reportTopicsByTask('每日早报'), { u1: ['AI'], u2: ['机器人'] })
+    assert.deepEqual(store.listReportTopics('u1'), [{ taskName: '每日早报', topics: ['AI'] }])
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})

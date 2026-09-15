@@ -101,3 +101,26 @@ test('recentFingerprints/recentTitles respect the 7-day window', () => {
     store.close(); fs.rmSync(file, { force: true })
   }
 })
+
+test('user-scoped reports are isolated from the shared version (ADR-0019)', () => {
+  const { file, store } = setup()
+  try {
+    const now = Date.now()
+    const shared = store.saveReport({ taskId: 't1', name: '早报', runAt: now, items: [{ title: '公共新闻', summary: '', source: '', url: '' }] })
+    const mine = store.saveReport({ taskId: 't1', name: '早报', runAt: now, userId: 'u1', items: [{ title: '个性化新闻', summary: '', source: '', url: '' }] })
+    // id 不同（用户维度隔离，互不覆盖）
+    assert.notEqual(shared.id, mine.id)
+    assert.equal(store.getReport(shared.id).userId, '')
+    assert.equal(store.getReport(mine.id).userId, 'u1')
+    // 去重窗口按用户维度隔离
+    assert.ok(store.recentFingerprints('t1', 7).has(fingerprintOf('公共新闻')))
+    assert.ok(!store.recentFingerprints('t1', 7).has(fingerprintOf('个性化新闻')))
+    assert.ok(store.recentFingerprints('t1', 7, { userId: 'u1' }).has(fingerprintOf('个性化新闻')))
+    assert.ok(!store.recentFingerprints('t1', 7, { userId: 'u1' }).has(fingerprintOf('公共新闻')))
+    // listReports 按维度过滤
+    assert.deepEqual(store.listReports('t1', 5).map((r) => r.id), [shared.id])
+    assert.deepEqual(store.listReports('t1', 5, { userId: 'u1' }).map((r) => r.id), [mine.id])
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})

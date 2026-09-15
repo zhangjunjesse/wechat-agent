@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **274/274 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **278/278 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -162,8 +162,13 @@
 - 公网页：`GET /reports/<id>`（响应式 HTML）+ `/poster`（海报 PNG）+ `/cover`（兼容旧封面），
   兼容 `/wechat-agent` 子路径。
 - 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可「第 N 条展开讲讲」。
+- **主题订阅（ADR-0019，per-user 严格隔离）**：用户可对自己的公共任务设置关注主题
+  （`update_report_topics`/`list_report_topics` 工具；对话里说「订阅 AI 主题」即完成）。
+  到点生成 = 公共版一次（无主题订阅者共享）+ 每个有主题用户**单独生成**贴合自己主题
+  的日报（prompt 注入主题、报告/去重按用户维度隔离、海报标题带主题徽标、公网链接独立）。
+  主动引导三入口：订阅回执提示、海报底部引导行、推送短描述。
 - 设计/决策：`docs/DESIGN-daily-report.md` → `docs/ADR-0017-daily-report-pipeline.md` +
-  `docs/ADR-0018-poster-render.md`。
+  `docs/ADR-0018-poster-render.md` + `docs/ADR-0019-report-topics.md`。
 - **已部署 + 实测**（2026-09-15，两轮）：生产 `datadefender.cn/wechat-agent` 已上线
   （源码挂载 `/opt/wechat-agent/app`，`docker restart` 生效，env 零改动）：
   - 第一轮：海报 750×2414（7 条 AI/科技要闻）→ 推送成功（`lastError` 空）；

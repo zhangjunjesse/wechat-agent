@@ -100,3 +100,40 @@ test('get_daily_report returns the latest report only for subscribed/owned tasks
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
   }
 })
+
+test('update/list report topics are per-user and gated on subscription', async () => {
+  const file = path.join(os.tmpdir(), `tk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const repFile = file + '.rep.db'
+  const store = new TaskStore({ file })
+  const reportStore = new ReportStore({ file: repFile })
+  const tools = taskTools({ taskStore: store, reportStore })
+  const ctx = (userId = 'u1') => ({ context: { userId } })
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    // 未订阅设置主题 → 拒绝
+    const denied = await call(tools.updateReportTopics, { name: '每日早报', topics: ['AI'] }, ctx('u1'))
+    assert.match(denied, /未订阅/)
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'u2')
+    // u1 设置主题，u2 看不到
+    const ok = await call(tools.updateReportTopics, { name: '每日早报', topics: ['AI', '芯片'] }, ctx('u1'))
+    assert.match(ok, /AI、芯片/)
+    const mine = await call(tools.listReportTopics, {}, ctx('u1'))
+    assert.match(mine, /每日早报：AI、芯片/)
+    const other = await call(tools.listReportTopics, {}, ctx('u2'))
+    assert.match(other, /还没有设置个性化主题/)
+    // 清除
+    const cleared = await call(tools.updateReportTopics, { name: '每日早报', topics: [] }, ctx('u1'))
+    assert.match(cleared, /清除/)
+    assert.equal(store.getReportTopics('每日早报', 'u1').length, 0)
+    // get_daily_report 优先个性化版（u1 有主题报告时返回它而非公共版）
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now() - 1000, items: [{ title: '公共条', summary: 's' }] })
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), userId: 'u1', items: [{ title: '我的个性化条', summary: 's' }] })
+    const out = await call(tools.getDailyReport, {}, ctx('u1'))
+    assert.match(out, /我的个性化条/)
+    assert.doesNotMatch(out, /公共条/)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
+  }
+})

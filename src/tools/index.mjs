@@ -62,6 +62,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   if (taskStore) {
     const tasks = taskTools({ taskStore, reportStore })
     tools.push(tasks.createTask, tasks.listMyTasks, tasks.deleteTask, tasks.listGlobalTasks, tasks.subscribeTask, tasks.unsubscribeTask)
+    tools.push(tasks.updateReportTopics, tasks.listReportTopics)
     if (reportStore) tools.push(tasks.getDailyReport)
   }
   if (wechatLogStore) {

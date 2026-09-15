@@ -23,6 +23,7 @@ export class ReportStore {
       CREATE TABLE IF NOT EXISTS reports (
         id          TEXT PRIMARY KEY,
         task_id     TEXT NOT NULL,
+        user_id     TEXT NOT NULL DEFAULT '',
         name        TEXT NOT NULL,
         run_at      INTEGER NOT NULL,
         focus       TEXT NOT NULL DEFAULT '',
@@ -43,22 +44,24 @@ export class ReportStore {
         PRIMARY KEY (report_id, idx)
       );
     `)
-    // 迁移：老库无 poster_path 列（ADR-0018 海报化）
+    // 迁移：老库无 poster_path / user_id 列（ADR-0018 海报化 + ADR-0019 主题个性化）
     const cols = this.#db.prepare('PRAGMA table_info(reports)').all().map((c) => c.name)
     if (!cols.includes('poster_path')) this.#db.exec("ALTER TABLE reports ADD COLUMN poster_path TEXT NOT NULL DEFAULT ''")
+    if (!cols.includes('user_id')) this.#db.exec("ALTER TABLE reports ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
   }
 
   /** 持久化一份报告（同一任务同一天幂等：覆盖旧内容，id 不变）。
-   * @returns 已入库的完整报告（含 items）。 */
-  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', posterPath = '', items = [] }) {
-    const id = reportIdOf(taskId, runAt)
+   * `userId` 缺省 = 公共版（所有未设主题的订阅者共享）；传了 = 该用户个性化版
+   * （ADR-0019），id 与公共版不同、去重窗口独立。 @returns 已入库的完整报告。 */
+  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', posterPath = '', items = [], userId = '' }) {
+    const id = reportIdOf(taskId, runAt, userId)
     const created = Date.now()
     this.#db.prepare('DELETE FROM report_items WHERE report_id = ?').run(id)
     this.#db.prepare('DELETE FROM reports WHERE id = ?').run(id)
     this.#db.prepare(`
-      INSERT INTO reports (id, task_id, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, String(taskId), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), String(posterPath || ''), items.length, Math.floor(created))
+      INSERT INTO reports (id, task_id, user_id, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, String(taskId), String(userId || ''), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), String(posterPath || ''), items.length, Math.floor(created))
     const ins = this.#db.prepare(`
       INSERT INTO report_items (report_id, idx, title, summary, source, url, fingerprint)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -76,6 +79,7 @@ export class ReportStore {
     return {
       id: row.id,
       taskId: row.task_id,
+      userId: row.user_id || '',
       name: row.name,
       runAt: Number(row.run_at),
       focus: row.focus || '',
@@ -86,33 +90,34 @@ export class ReportStore {
     }
   }
 
-  /** 近 `days` 天内该任务已报道条目的标题指纹集合（用于机械去重）。 */
-  recentFingerprints(taskId, days = 7) {
+  /** 近 `days` 天内该任务（某用户维度）已报道条目的标题指纹集合。
+   * userId 缺省 = 公共版；传了 = 该用户个性化版（ADR-0019，互不串）。 */
+  recentFingerprints(taskId, days = 7, { userId = '' } = {}) {
     const since = Date.now() - days * 86_400_000
     const rows = this.#db.prepare(`
       SELECT i.fingerprint FROM report_items i JOIN reports r ON r.id = i.report_id
-      WHERE r.task_id = ? AND r.run_at >= ? AND i.fingerprint != ''
-    `).all(String(taskId), Math.floor(since))
+      WHERE r.task_id = ? AND r.user_id = ? AND r.run_at >= ? AND i.fingerprint != ''
+    `).all(String(taskId), String(userId || ''), Math.floor(since))
     return new Set(rows.map((r) => r.fingerprint))
   }
 
-  /** 近 `days` 天内该任务已报道条目的标题（新→旧，注入 prompt 用）。 */
-  recentTitles(taskId, days = 7, limit = 20) {
+  /** 近 `days` 天内该任务（某用户维度）已报道条目的标题（新→旧，注入 prompt 用）。 */
+  recentTitles(taskId, days = 7, limit = 20, { userId = '' } = {}) {
     const since = Date.now() - days * 86_400_000
     const rows = this.#db.prepare(`
       SELECT i.title FROM report_items i JOIN reports r ON r.id = i.report_id
-      WHERE r.task_id = ? AND r.run_at >= ?
+      WHERE r.task_id = ? AND r.user_id = ? AND r.run_at >= ?
       ORDER BY r.run_at DESC, i.idx ASC LIMIT ?
-    `).all(String(taskId), Math.floor(since), Math.floor(limit))
+    `).all(String(taskId), String(userId || ''), Math.floor(since), Math.floor(limit))
     return rows.map((r) => r.title)
   }
 
-  /** 该任务的最近报告概览（新→旧）。 */
-  listReports(taskId, limit = 5) {
+  /** 该任务（某用户维度）的最近报告概览（新→旧）。 */
+  listReports(taskId, limit = 5, { userId = '' } = {}) {
     const rows = this.#db.prepare(`
       SELECT id, name, run_at, focus, items_count FROM reports
-      WHERE task_id = ? ORDER BY run_at DESC LIMIT ?
-    `).all(String(taskId), Math.floor(limit))
+      WHERE task_id = ? AND user_id = ? ORDER BY run_at DESC LIMIT ?
+    `).all(String(taskId), String(userId || ''), Math.floor(limit))
     return rows.map((r) => ({ id: r.id, name: r.name, runAt: Number(r.run_at), focus: r.focus || '', itemsCount: Number(r.items_count) }))
   }
 
@@ -121,11 +126,13 @@ export class ReportStore {
   }
 }
 
-/** 报告 id：任务 + 北京时间日期，同一任务同一天稳定（幂等 upsert 的依据）。 */
-export function reportIdOf(taskId, runAt = Date.now()) {
+/** 报告 id：任务（+用户维度）+ 北京时间日期，同一任务同一天稳定（幂等 upsert 的依据）。
+ * userId 缺省为公共版；个性化版 id 与公共版不同（ADR-0019，互不覆盖）。 */
+export function reportIdOf(taskId, runAt = Date.now(), userId = '') {
   const p = beijingParts(runAt)
   const ymd = `${p.year}${String(p.month).padStart(2, '0')}${String(p.day).padStart(2, '0')}`
-  return `rp-${createHash('sha1').update(String(taskId)).digest('hex').slice(0, 8)}-${ymd}`
+  const key = userId ? `${String(taskId)}|${String(userId)}` : String(taskId)
+  return `rp-${createHash('sha1').update(key).digest('hex').slice(0, 8)}-${ymd}`
 }
 
 /** 标题指纹：小写 + 去空白与中英文标点，保留字母/数字/汉字。

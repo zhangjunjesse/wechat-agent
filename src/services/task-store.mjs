@@ -39,6 +39,16 @@ export class TaskStore {
     const cols = this.#db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name)
     if (!cols.includes('kind')) this.#db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'plain'")
     if (!cols.includes('cover')) this.#db.exec('ALTER TABLE tasks ADD COLUMN cover INTEGER NOT NULL DEFAULT 0')
+    // 用户主题订阅（ADR-0019）：per-user，按 user_id 隔离；只对已订阅任务生效。
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS report_topics (
+        user_id    TEXT NOT NULL,
+        task_name  TEXT NOT NULL,
+        topics     TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, task_name)
+      );
+    `)
   }
 
   // ---- user (private) tasks ----
@@ -119,6 +129,45 @@ export class TaskStore {
     const task = this.#db.prepare('SELECT subscribers FROM tasks WHERE scope = ? AND name = ?').get('global', String(globalName))
     if (!task) return false
     return safeJson(task.subscribers, []).includes(String(userId))
+  }
+
+  // ---- per-user report topics（ADR-0019：主题订阅，严格按用户隔离）----
+
+  /** 设置用户对某任务的关注主题（替代式：传空数组 = 清除个性化，回到公共版）。 */
+  setReportTopics({ globalName, userId, topics = [] }) {
+    const task = this.#db.prepare('SELECT scope FROM tasks WHERE scope = ? AND name = ?').get('global', String(globalName))
+    if (!task) throw new Error(`公共任务「${globalName}」不存在`)
+    if (!this.isSubscribed(globalName, userId)) throw new Error(`你未订阅「${globalName}」，请先订阅再设置主题`)
+    const cleaned = topics.map((t) => String(t).trim()).filter(Boolean).slice(0, 10)
+    const uid = String(userId)
+    this.#db.prepare(`
+      INSERT INTO report_topics (user_id, task_name, topics, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, task_name) DO UPDATE SET topics = excluded.topics, updated_at = excluded.updated_at
+    `).run(uid, String(globalName), JSON.stringify(cleaned), Date.now())
+    return cleaned
+  }
+
+  /** 读取用户对某任务的关注主题（未设置返回 []）。 */
+  getReportTopics(globalName, userId) {
+    const row = this.#db.prepare('SELECT topics FROM report_topics WHERE user_id = ? AND task_name = ?').get(String(userId), String(globalName))
+    return row ? safeJson(row.topics, []) : []
+  }
+
+  /** 该任务下所有设了主题的订阅者（userId → topics），供调度器分组生成。 */
+  reportTopicsByTask(globalName) {
+    const rows = this.#db.prepare('SELECT user_id, topics FROM report_topics WHERE task_name = ?').all(String(globalName))
+    const map = {}
+    for (const r of rows) {
+      const t = safeJson(r.topics, [])
+      if (t.length) map[r.user_id] = t
+    }
+    return map
+  }
+
+  listReportTopics(userId) {
+    const rows = this.#db.prepare('SELECT task_name, topics FROM report_topics WHERE user_id = ?').all(String(userId))
+    return rows.map((r) => ({ taskName: r.task_name, topics: safeJson(r.topics, []) }))
   }
 
   // ---- shared ----

@@ -82,7 +82,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
 
   const subscribeTask = tool({
     name: 'subscribe_task',
-    description: '订阅一个公共定时任务（到点自动执行并推送到本用户微信）。可先 list_global_tasks 查看目录。',
+    description: '订阅一个公共定时任务（到点自动执行并推送到本用户微信）。可先 list_global_tasks 查看目录。订阅后建议引导用户设置感兴趣的主题（update_report_topics），让日报更贴合。',
     parameters: {
       type: 'object',
       properties: { name: { type: 'string', description: '公共任务名' } },
@@ -92,7 +92,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       const userId = ctx?.context?.userId
       try {
         taskStore.subscribe(input.name, userId)
-        return `已订阅公共任务「${input.name}」，到点会推送到你的微信。`
+        return `已订阅公共任务「${input.name}」，到点会推送到你的微信。\n想让它更贴合你？告诉我感兴趣的主题，比如「订阅 AI 主题」，日报就会围绕你关注的方向生成。`
       } catch (e) {
         return `订阅失败：${e.message}`
       }
@@ -134,21 +134,30 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       const userId = ctx?.context?.userId
       if (!reportStore) return '报告功能未启用。'
       let report = null
+      const latestFor = (taskId) => {
+        // 优先自己主题的个性化报告，回退公共版
+        const mine = reportStore.listReports(taskId, 1, { userId })
+        const shared = reportStore.listReports(taskId, 1)
+        const cands = [...mine, ...shared].sort((a, b) => b.runAt - a.runAt)
+        return cands.length ? reportStore.getReport(cands[0].id) : null
+      }
       if (input.name) {
         // 只允许查看自己订阅的公共任务 / 自己创建的任务的报告
         const sub = taskStore.listGlobalTasks().find((t) => t.name === input.name && t.subscribers.includes(userId))
         const mine = taskStore.listUserTasks(userId).find((t) => t.name === input.name)
         if (!sub && !mine) return `你未订阅/未创建任务「${input.name}」，无法查看其报告。`
         const taskId = sub ? `global-${sub.name}` : `user-${userId}-${mine.name}`
-        const list = reportStore.listReports(taskId, 1)
-        report = list.length ? reportStore.getReport(list[0].id) : null
+        report = latestFor(taskId)
       } else {
-        // 已订阅的报告类公共任务中取最近一份
+        // 已订阅的报告类公共任务中取最近一份（含个性化）
         let best = null
         for (const t of taskStore.listGlobalTasks()) {
           if (t.kind !== 'report' || !t.subscribers.includes(userId)) continue
-          const list = reportStore.listReports(`global-${t.name}`, 1)
-          if (list.length && (!best || list[0].runAt > best.runAt)) best = list[0]
+          const taskId = `global-${t.name}`
+          const mine = reportStore.listReports(taskId, 1, { userId })
+          const shared = reportStore.listReports(taskId, 1)
+          const cands = [...mine, ...shared].sort((a, b) => b.runAt - a.runAt)
+          if (cands.length && (!best || cands[0].runAt > best.runAt)) best = cands[0]
         }
         report = best ? reportStore.getReport(best.id) : null
       }
@@ -166,7 +175,46 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
     },
   })
 
-  return { createTask, listMyTasks, deleteTask, listGlobalTasks, subscribeTask, unsubscribeTask, getDailyReport }
+  const updateReportTopics = tool({
+    name: 'update_report_topics',
+    description:
+      '设置用户自己对一个已订阅公共任务的个性化主题（如「订阅 AI 主题」「关注 芯片 新能源」）。' +
+      '设置后该任务的日报将围绕这些主题单独生成（只影响自己，不串他人）。传空列表 topics 表示清除个性化，回到公共版。' +
+      '用户表达"订阅/关注/想要 XX 主题、想定制日报、换个主题"时使用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '已订阅的公共任务名（如「每日早报」）' },
+        topics: { type: 'array', items: { type: 'string' }, description: '感兴趣的主题列表（1-5 个，如 ["AI","芯片"]；空数组 = 清除个性化）' },
+      },
+      required: ['name', 'topics'],
+    },
+    execute: async (input, ctx) => {
+      const userId = ctx?.context?.userId
+      try {
+        const topics = taskStore.setReportTopics({ globalName: input.name, userId, topics: input.topics || [] })
+        return topics.length
+          ? `已设置「${input.name}」的个性化主题：${topics.join('、')}。从下次推送起，日报会围绕这些主题生成（只对你生效）。随时可改：告诉我新的主题即可。`
+          : `已清除「${input.name}」的个性化主题，回到公共版日报。`
+      } catch (e) {
+        return `设置失败：${e.message}`
+      }
+    },
+  })
+
+  const listReportTopics = tool({
+    name: 'list_report_topics',
+    description: '查看自己已设置的所有个性化主题订阅。',
+    parameters: { type: 'object', properties: {}, required: [] },
+    execute: async (_input, ctx) => {
+      const userId = ctx?.context?.userId
+      const rows = taskStore.listReportTopics(userId)
+      if (!rows.length) return '你还没有设置个性化主题。订阅任务后告诉我感兴趣的主题（如「订阅 AI 主题」），日报会更贴合你。'
+      return rows.map((r) => `- ${r.taskName}：${r.topics.join('、')}`).join('\n')
+    },
+  })
+
+  return { createTask, listMyTasks, deleteTask, listGlobalTasks, subscribeTask, unsubscribeTask, updateReportTopics, listReportTopics, getDailyReport }
 }
 
 /** 供测试/展示：任务的下次触发时间。 */
