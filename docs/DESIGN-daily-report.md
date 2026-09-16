@@ -2,7 +2,9 @@
 
 - 状态：Working（待实施；实施并验证后收敛为稳定决策 ADR-0017）
 - 关联：ADR-0014（定时任务）、ADR-0003（system prompt 分层）、ADR-0008（公网下载链接）、
-  ADR-0009（iLink 发送）、DESIGN-timed-tasks.md（任务模型）
+  ADR-0009（iLink 发送）、DESIGN-timed-tasks.md（任务模型）、ADR-0031（「每日早报」已
+  改名为「每日资讯」，配置带 `renamedFrom` 做订阅者迁移——本文记录的是改名前的事实，
+  下文出现的「每日早报」一律读作现在的「每日资讯」）
 - 日期：2026-09-16
 - 作者：wechat-agent 开发会话
 

@@ -55,6 +55,14 @@ export class ReportStore {
     if (!cols.includes('poster_path')) this.#db.exec("ALTER TABLE reports ADD COLUMN poster_path TEXT NOT NULL DEFAULT ''")
     if (!cols.includes('user_id')) this.#db.exec("ALTER TABLE reports ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
     if (!cols.includes('topic')) this.#db.exec("ALTER TABLE reports ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+    // 迁移：微信日报/周报（DESIGN-wechat-digest.md）复用本归档库，需要两件事——
+    //   reports.kind        'report'（每日资讯）| 'wechat-digest'（微信日报/周报）：
+    //                       决定 H5 页和海报用哪套模板（app.mjs 据此路由）；
+    //   report_items.section digest 的三节（action_items/work_updates/fun）归属。
+    // 默认值让老数据原样落在 'report' / 空 section 上，行为不变。
+    if (!cols.includes('kind')) this.#db.exec("ALTER TABLE reports ADD COLUMN kind TEXT NOT NULL DEFAULT 'report'")
+    const itemCols = this.#db.prepare('PRAGMA table_info(report_items)').all().map((c) => c.name)
+    if (!itemCols.includes('section')) this.#db.exec("ALTER TABLE report_items ADD COLUMN section TEXT NOT NULL DEFAULT ''")
   }
 
   /** 持久化一份报告（同一任务同一天同一用户同一主题幂等：覆盖旧内容，id 不变）。
@@ -62,21 +70,21 @@ export class ReportStore {
    * （ADR-0019）。`topic` 缺省 = 无主题；传了 = 该用户该主题独立一份（ADR-0027：
    * 订阅多个主题时每个主题各自生成、各自去重、各自海报，不再合并成一份），
    * id 与其他主题/公共版都不同、去重窗口独立。 @returns 已入库的完整报告。 */
-  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', posterPath = '', items = [], userId = '', topic = '' }) {
+  saveReport({ taskId, name, runAt, focus = '', rawText = '', coverPath = '', posterPath = '', items = [], userId = '', topic = '', kind = 'report' }) {
     const id = reportIdOf(taskId, runAt, userId, topic)
     const created = Date.now()
     this.#db.prepare('DELETE FROM report_items WHERE report_id = ?').run(id)
     this.#db.prepare('DELETE FROM reports WHERE id = ?').run(id)
     this.#db.prepare(`
-      INSERT INTO reports (id, task_id, user_id, topic, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, String(taskId), String(userId || ''), String(topic || ''), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), String(posterPath || ''), items.length, Math.floor(created))
+      INSERT INTO reports (id, task_id, user_id, topic, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at, kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, String(taskId), String(userId || ''), String(topic || ''), String(name), Math.floor(runAt), String(focus || ''), String(rawText || ''), String(coverPath || ''), String(posterPath || ''), items.length, Math.floor(created), String(kind || 'report'))
     const ins = this.#db.prepare(`
-      INSERT INTO report_items (report_id, idx, title, summary, source, url, fingerprint)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO report_items (report_id, idx, title, summary, source, url, fingerprint, section)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     items.forEach((it, idx) => {
-      ins.run(id, idx, String(it.title || ''), String(it.summary || ''), String(it.source || ''), String(it.url || ''), fingerprintOf(it.title))
+      ins.run(id, idx, String(it.title || ''), String(it.summary || ''), String(it.source || ''), String(it.url || ''), fingerprintOf(it.title), String(it.section || ''))
     })
     return this.getReport(id)
   }
@@ -84,19 +92,20 @@ export class ReportStore {
   getReport(id) {
     const row = this.#db.prepare('SELECT * FROM reports WHERE id = ?').get(String(id))
     if (!row) return null
-    const itemRows = this.#db.prepare('SELECT idx, title, summary, source, url, fingerprint FROM report_items WHERE report_id = ? ORDER BY idx').all(String(id))
+    const itemRows = this.#db.prepare('SELECT idx, title, summary, source, url, fingerprint, section FROM report_items WHERE report_id = ? ORDER BY idx').all(String(id))
     return {
       id: row.id,
       taskId: row.task_id,
       userId: row.user_id || '',
       topic: row.topic || '',
       name: row.name,
+      kind: row.kind || 'report',
       runAt: Number(row.run_at),
       focus: row.focus || '',
       rawText: row.raw_text || '',
       coverPath: row.cover_path || '',
       posterPath: row.poster_path || '',
-      items: itemRows.map((r) => ({ title: r.title, summary: r.summary, source: r.source, url: r.url, fingerprint: r.fingerprint })),
+      items: itemRows.map((r) => ({ title: r.title, summary: r.summary, source: r.source, url: r.url, fingerprint: r.fingerprint, section: r.section || '' })),
     }
   }
 

@@ -8,14 +8,24 @@ import { VerificationService } from './services/verification-service.mjs'
 import { resolveUserPath } from './services/user-sandbox.mjs'
 import { renderPage } from './ui-page.mjs'
 import { renderReportPage } from './services/daily-report.mjs'
+import { renderDigestPage } from './services/wechat-digest.mjs'
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null }) {
+/** 注册核验成功后自动订阅的公共任务（ADR-0031）。名字必须与
+ * `deploy/global-tasks.json` 里的 `name` 完全一致；对不上时 `subscribe` 抛
+ * 「公共任务「X」不存在」，由 `buildOnVerified` 吞掉并上报，不拦核验本身。 */
+export const DEFAULT_SUBSCRIPTIONS = ['每日资讯']
+
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null, taskStore = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onVerifiedError = (error, name) => console.warn(`default subscription failed${name ? ` (${name})` : ''}: ${error?.message || error}`) }) {
   const owned = []
   let polling
   const lastPollLog = new Map() // providerBotId -> { at, error }
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
   const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens })
-  const verification = verifier ? new VerificationService({ verifier, store: profileStore }) : null
+  // 核验通过 → 默认订阅（ADR-0031）。VerificationService 的 onVerified 钩子此前
+  // 一直是 null（存在但没人接），这里是它的第一个使用者。
+  const verification = verifier
+    ? new VerificationService({ verifier, store: profileStore, onVerified: buildOnVerified({ taskStore, profileStore, provider, contextTokens, defaultSubscriptions, onError: onVerifiedError }) })
+    : null
   // Polling failures (e.g. iLink session timeout -14) mark the binding as
   // expired so the UI can tell the user to re-bind; the error is logged once
   // per distinct message, not once per 1s poll tick.
@@ -91,7 +101,10 @@ export function createApp({ provider, agent = { async respond({ text }) { return
       if (req.method === 'GET' && reportMatch) {
         const report = reportStore?.getReport(safeDecode(reportMatch[1]))
         if (!report) return json(res, 404, { error: 'report_not_found' })
-        return html(res, 200, renderReportPage(report))
+        // 同一条 /reports/<id> 路由，两套模板：每日资讯走 ADR-0018 的新闻版式，
+        // 微信日报/周报走分节 + 溯源版式（DESIGN-wechat-digest.md）。老数据
+        // kind 默认 'report'，行为不变。
+        return html(res, 200, report.kind === 'wechat-digest' ? renderDigestPage(report) : renderReportPage(report))
       }
       const profileMatch = url.pathname.match(/^\/api\/profiles\/([^/]+)$/)
       if (req.method === 'GET' && profileMatch) return json(res, 200, { profile: await profileStore?.get(assertHeader(req, 'x-user-id')) })
@@ -118,6 +131,62 @@ export function createApp({ provider, agent = { async respond({ text }) { return
     } catch (error) { return json(res, error.message === 'unauthorized' ? 401 : 400, { error: error.message }) }
   }
 }
+/** 构造 `VerificationService` 的 onVerified 钩子：核验通过即默认订阅
+ * `defaultSubscriptions` 里的公共任务，并（若该链路有可用会话）发一条欢迎语。
+ * 单独导出而不是内联进 `createApp`，是为了能脱离 HTTP 层直接测。
+ *
+ * **订阅键（这是整件事唯一容易做错的地方）**：必须与 `subscribe_task` 工具
+ * （`ctx.context.userId`）和调度器 `#fanoutReport` 的
+ * `profileStore.get(userId)` / `contextTokens.get(ilinkId)` 用**同一个**稳定
+ * 租户键 = iLink `providerUserId`（ADR-0004）。证据链：
+ *   - `message-router.mjs` `tenantKey = normalized.providerUserId || …` →
+ *     `agent.respond({ userId: tenantKey })` → `agents-sdk-agent.mjs` 的
+ *     `run(..., { context: { userId, … } })` → 工具里的 `ctx.context.userId`；
+ *     所以 `tasks.subscribers` 里存的是 providerUserId。
+ *   - `context-token-cache` 由 `message-router` 用 `normalized.providerUserId`
+ *     写入，同一命名空间。
+ *   - 而 `ProfileStore` 的**记录键**是网页那次性的 browser id（`x-user-id`），
+ *     iLink id 只是记录里的 `ilinkUserId` 字段——两者是不同命名空间，靠
+ *     `ProfileStore.get()` 里的 `#byIlink` 反查才对得上。
+ * 这里传进来的 `userId` 正是 browser id，所以**必须**过一道 `stableKey()`
+ * （ADR-0004 定义的规范解析：`profile.ilinkUserId || userId`）。调用时机也有讲究：
+ * `VerificationService` 先 `store.put(userId, profile)` 再调本钩子，此刻
+ * `#byIlink` 已建好索引，`stableKey` 才解析得出来。
+ *
+ * 失败一律吞掉并上报 `onError`：默认订阅是锦上添花，绝不能让它把「核验成功」
+ * 这件事本身搞挂（HTTP 层 `check()` 的返回值是用户在网页上唯一的反馈）。 */
+export function buildOnVerified({ taskStore, profileStore = null, provider = null, contextTokens = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onError = () => {} } = {}) {
+  const names = (defaultSubscriptions || []).map((n) => String(n).trim()).filter(Boolean)
+  if (!taskStore || !names.length) return null
+  return async ({ userId, profile } = {}) => {
+    try {
+      const key = String((await profileStore?.stableKey?.(userId)) || profile?.ilinkUserId || userId || '')
+      if (!key) return
+      const subscribed = []
+      for (const name of names) {
+        try {
+          // 重复核验（用户重新走一遍网页流程）不重复订阅、也不重复发欢迎语。
+          // `taskStore.subscribe` 本身已经幂等，这道检查是为了后者。
+          if (taskStore.isSubscribed(name, key)) continue
+          taskStore.subscribe(name, key)
+          subscribed.push(name)
+        } catch (error) { onError(error, name) }
+      }
+      if (!subscribed.length) return
+      // 欢迎语是 best-effort：核验走的是网页（没有 iLink 会话），只有该用户此前
+      // 给 Bot 发过消息、缓存里有 contextToken 时才发得出去。发不出去就只订阅。
+      const cached = contextTokens?.get?.(key)
+      if (typeof provider?.sendText !== 'function' || !cached?.contextToken) return
+      await provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: key, contextToken: cached.contextToken, text: welcomeText(subscribed) })
+    } catch (error) { onError(error) }
+  }
+}
+
+function welcomeText(names) {
+  const list = names.map((n) => `「${n}」`).join('、')
+  return `✅ 身份已核验，欢迎使用微信个人助手。\n我已默认为你订阅${list}，到点自动推送到这个对话，不用做任何设置。\n不想收了随时回我「退订${names[0]}」；想看看还有什么可订的，回我「有哪些公共任务」。`
+}
+
 export function listen(app, { port = 8787, host = '127.0.0.1' } = {}) { const server = http.createServer(app); return new Promise((resolve) => server.listen(port, host, () => resolve(server))) }
 function assertHeader(req, name) { const value = req.headers[name]; if (typeof value !== 'string' || !value.trim()) throw new Error('unauthorized'); return value }
 function readJson(req) { return new Promise((resolve, reject) => { let data = ''; req.on('data', (chunk) => { data += chunk; if (data.length > 1_000_000) reject(new Error('body_too_large')) }); req.on('end', () => { try { resolve(JSON.parse(data || '{}')) } catch { reject(new Error('invalid_json')) } }); req.on('error', reject) }) }

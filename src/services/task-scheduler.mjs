@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { nextRunAt } from './schedule.mjs'
 import { buildReportPrompt, parseReportJson, dedupeItems, renderReportPoster, renderPushText } from './daily-report.mjs'
+import { digestWindowDays, renderDigestPushText, renderQuietText } from './wechat-digest.mjs'
 
 /** 定时任务调度器（DESIGN-timed-tasks.md + DESIGN-daily-report.md + ADR-0018 + ADR-0026）。
  *
@@ -40,6 +41,8 @@ export class TaskScheduler {
   #reportStore
   #reportUrl
   #posterRender
+  #digestRunner
+  #digestQuietPush
   #now
   #tickMs
   #retryMax
@@ -48,7 +51,7 @@ export class TaskScheduler {
   #timer = null
   #running = false
 
-  constructor({ taskStore, agent, provider, profileStore, contextTokens, now = () => Date.now(), tickMs = 30_000, onError = null, reportStore = null, reportUrl = null, posterRender = null, retryMax = 3, retryIntervalMs = 20 * 60_000 }) {
+  constructor({ taskStore, agent, provider, profileStore, contextTokens, now = () => Date.now(), tickMs = 30_000, onError = null, reportStore = null, reportUrl = null, posterRender = null, retryMax = 3, retryIntervalMs = 20 * 60_000, digestRunner = null, digestQuietPush = true }) {
     this.#taskStore = taskStore
     this.#agent = agent
     this.#provider = provider
@@ -57,6 +60,8 @@ export class TaskScheduler {
     this.#reportStore = reportStore
     this.#reportUrl = reportUrl
     this.#posterRender = posterRender
+    this.#digestRunner = digestRunner
+    this.#digestQuietPush = digestQuietPush
     this.#now = now
     this.#tickMs = tickMs
     this.#retryMax = retryMax
@@ -138,6 +143,15 @@ export class TaskScheduler {
     if (task.scope === 'global' && task.kind === 'report' && this.#reportStore) {
       return this.#runReportTask(task)
     }
+    // 微信日报/周报（DESIGN-wechat-digest.md）：per-user 生成，不是一次生成全员扇出。
+    // 未配置 digestRunner（无 WECHAT_LOG_DB / 本地开发）时整条分支不存在，任务
+    // 落到下面的 plain 路径也只会推一条没内容的文本——所以这里直接判为跳过。
+    if (task.scope === 'global' && task.kind === 'wechat-digest') {
+      if (!this.#digestRunner || !this.#reportStore) {
+        return { results: [{ userId: `task-${task.id}`, skipped: 'digest_not_configured' }], retry: false }
+      }
+      return this.#runDigestTask(task)
+    }
     const targets = task.scope === 'user' ? [task.ownerUserId] : (task.subscribers || [])
     const results = []
     for (const userId of targets) {
@@ -218,6 +232,69 @@ export class TaskScheduler {
     return { results, retry: nextPending.length > 0 }
   }
 
+  /** 微信日报/周报（kind='wechat-digest'，DESIGN-wechat-digest.md）。
+   *
+   * 与 `#runReportTask` 的结构刻意保持一致（单元级重试、`retry_units` 持久化、
+   * 按单元措辞的失败话术都原样复用 ADR-0026/0028 的机制），但**生成单元的定义
+   * 不同**：日报是"公共版 + 每个 (用户,主题)"，这里是**每个订阅者各一个单元**
+   * ——内容全部来自该用户自己的群，没有任何可共享的部分，一次生成全员扇出的
+   * 模型在这里根本不成立。单元 key 沿用 `{userId, topic:''}`，与 `retry_units`
+   * 的既有形状兼容，不需要为它再开一列。
+   *
+   * **逐用户串行**：LLM 调用走调度器专属实例（ADR-0028），本来就是一条串行
+   * 队列，这里不额外并发；单用户失败只影响他自己那个单元。
+   *
+   * **"空"不是失败**：三节全空（`empty:true`）走静默路径——默认发一句
+   * "今天各群平静"的短文本、不发海报（`digestQuietPush=false` 则彻底不发），
+   * 并且**直接算作已处理**，不进 `retry_units`。把"没内容"当成失败去重试，会
+   * 让每个安静的日子都触发 3 轮无谓的 LLM 调用和一条"生成失败"的话术。 */
+  async #runDigestTask(task) {
+    const now = this.#now()
+    const windowDays = digestWindowDays(task.schedule)
+    const subscribers = task.subscribers || []
+    const unitKey = (u) => `${u.userId} ${u.topic}`
+    const allUnits = subscribers.map((userId) => ({ userId, topic: '' })) // 单元 = 一个订阅者
+    const pendingBefore = Array.isArray(task.retryUnits) ? task.retryUnits : []
+    const pendingByKey = new Map(pendingBefore.map((u) => [unitKey(u), u]))
+    const toAttempt = pendingBefore.length ? allUnits.filter((u) => pendingByKey.has(unitKey(u))) : allUnits
+    const results = []
+    const nextPending = []
+
+    for (const unit of toAttempt) {
+      const unitAttemptNumber = (pendingByKey.get(unitKey(unit))?.attempts || 0) + 1
+      const unitIsLast = unitAttemptNumber >= this.#retryMax + 1
+      // 身份先行：digest 的取数边界完全由 profile 的 wxid/nickname 决定
+      // （accessibleChats），未核验的用户根本无从取数——与 #fanoutReport 的
+      // unverified 跳过是同一个判断，提前到生成之前做，省掉一次注定为空的管道。
+      const profile = await this.#profileStore.get(unit.userId)
+      if (!profile?.nickname && !profile?.wxid) { results.push({ userId: unit.userId, skipped: 'unverified' }); continue }
+      let r
+      try {
+        r = await this.#digestRunner.generate({ task, userId: unit.userId, profile, now })
+      } catch (error) {
+        r = { ok: false, error: error.message || String(error) }
+      }
+      if (r.ok && r.empty) {
+        // 各群平静：可配置的静默。不占重试预算。
+        if (this.#digestQuietPush) results.push(await this.#fanoutReport(task, unit.userId, '', renderQuietText(task.name, { windowDays })))
+        else results.push({ userId: unit.userId, skipped: 'quiet_day' })
+        continue
+      }
+      if (r.ok) {
+        const url = this.#reportUrl ? this.#reportUrl(r.report.id) : ''
+        results.push(await this.#fanoutReport(task, unit.userId, r.report.posterPath, renderDigestPushText(r.report, { reportUrl: url })))
+        continue
+      }
+      const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+      results.push(await this.#fanoutReport(task, unit.userId, '', text))
+      results.push({ userId: `task-${task.id}-${unit.userId}`, error: r.error }) // 可观测
+      if (!unitIsLast) nextPending.push({ userId: unit.userId, topic: '', attempts: unitAttemptNumber })
+    }
+
+    this.#taskStore.setReportRetryUnits(task.id, nextPending)
+    return { results, retry: nextPending.length > 0 }
+  }
+
   /** 生成失败时推给用户的话术：还有重试机会就如实说"会自动重试"，重试耗尽就
    * 明说"今天放弃、明天再来"——不再用含糊的"请稍后重试"（其实没人会重试，
    * 用户只会干等或来问）。报告任务传入的是**该生成单元自己**的尝试次数/余量
@@ -290,8 +367,10 @@ export class TaskScheduler {
         }
       }
       await this.#provider.sendText({ providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken, text })
-      // 引导曝光埋点（ADR-0020）：海报/短描述带主题定制引导，记录展示
-      this.#taskStore.recordGuideEvent({ userId, event: 'guide_shown', entry: 'push', taskName: task.name })
+      // 引导曝光埋点（ADR-0020）：海报/短描述带**主题定制**引导，记录展示。
+      // 微信日报/周报没有主题概念、推送文案里也没有这条引导——给它记 guide_shown
+      // 会把 ADR-0020 的转化率分母灌水成"曝光了但从来不会转化"，故排除。
+      if (task.kind !== 'wechat-digest') this.#taskStore.recordGuideEvent({ userId, event: 'guide_shown', entry: 'push', taskName: task.name })
       return { userId, sent: true }
     } catch (error) {
       return { userId, error: error.message || String(error) }

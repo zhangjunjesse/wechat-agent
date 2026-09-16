@@ -30,7 +30,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
     parameters: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: '任务名（简短，如"每日早报"）' },
+        name: { type: 'string', description: '任务名（简短，如"每日资讯"）' },
         schedule: { type: 'string', description: '调度表达式：daily@HH:MM / weekly@D@HH:MM / hourly@MM' },
         instruction: { type: 'string', description: '到点后执行的指令（自然语言，如"搜索今天的AI要闻，汇总成5条简报推给我"）' },
       },
@@ -83,7 +83,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
 
   const listGlobalTasks = tool({
     name: 'list_global_tasks',
-    description: '列出公共定时任务目录（系统提供、可订阅的任务，如每日早报、每日总结）。用户可订阅后到点自动收到推送。',
+    description: '列出公共定时任务目录（系统提供、可订阅的任务，如每日资讯、微信日报、微信周报）。用户可订阅后到点自动收到推送。',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async (_input, ctx) => {
       const userId = ctx?.context?.userId
@@ -135,7 +135,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
   const getDailyReport = tool({
     name: 'get_daily_report',
     description:
-      '查看最近一份定时任务报告（如每日早报）的条目内容（标题/摘要/来源），用于**追问某一条的细节**。' +
+      '查看最近一份定时任务报告（如每日资讯）的条目内容（标题/摘要/来源），用于**追问某一条的细节**。' +
       '用户追问"早报第3条展开讲讲""今天的早报讲了什么"时使用；如需更详细信息可再配合 gzh_content 抓取原文。' +
       '⚠️ 用户订阅了多个主题时（ADR-0027），当天会有**多份独立报告**（每个主题各一份）；' +
       '不指定 topic 时本工具会把当天所有主题的报告都列出来。' +
@@ -173,7 +173,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
   const resendDailyReport = tool({
     name: 'resend_daily_report',
     description:
-      '重新发送最近一份定时报告（如每日早报）的**原始推送**——真实的海报图片 + 短描述，' +
+      '重新发送最近一份定时报告（如每日资讯）的**原始推送**——真实的海报图片 + 短描述，' +
       '和当时自动推送的一模一样。用户说"早报补发一下""日报没收到，再发一次""早报重发"这类' +
       '要求重新推送的话时用这个工具本身发送，**不要**先调 get_daily_report 拿文字内容再自己在' +
       '聊天里重新组织一遍——那样会丢图、模型自己加的 Markdown 微信不会渲染、还会把原文链接' +
@@ -236,7 +236,7 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
     parameters: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: '已订阅的公共任务名（如「每日早报」）' },
+        name: { type: 'string', description: '已订阅的公共任务名（如「每日资讯」）' },
         topics: { type: 'array', items: { type: 'string' }, description: `感兴趣的主题列表（1-${MAX_REPORT_TOPICS} 个，如 ["AI","芯片"]；空数组 = 清除个性化）。每多一个主题，用户每天就多收到一条独立推送，不要无脑帮用户加满。` },
       },
       required: ['name', 'topics'],

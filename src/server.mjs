@@ -29,6 +29,8 @@ import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
 import { TaskRunStore } from './services/task-run-store.mjs'
 import { SubagentRunner } from './services/subagent-runner.mjs'
 import { VisionClient } from './services/vision-client.mjs'
+import { GroupProfileStore } from './services/group-profile-store.mjs'
+import { WechatDigestRunner } from './services/wechat-digest-runner.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -48,6 +50,9 @@ const skillRegistry = new SkillRegistry({ dir: process.env.SKILLS_DIR || path.re
 const taskStore = new TaskStore({ file: process.env.TASKS_FILE || 'data/tasks.db' })
 const reportStore = new ReportStore({ file: process.env.REPORTS_FILE || 'data/reports.db' })
 const contextTokens = new ContextTokenCache({ file: process.env.CONTEXT_TOKENS_FILE || 'data/context-tokens.json' })
+// 群画像（DESIGN-wechat-digest.md）：微信日报/周报按群性质决定从每个群捞什么。
+// 独立库，与 tasks/reports 一样各自建表迁移。
+const groupProfiles = new GroupProfileStore({ file: process.env.DIGEST_FILE || 'data/digest.db' })
 const globalTasksFile = process.env.GLOBAL_TASKS_FILE || path.resolve(__dirname, '..', 'deploy', 'global-tasks.json')
 if (fs.existsSync(globalTasksFile)) {
   try {
@@ -121,7 +126,7 @@ const vision = visionModel && process.env.OPENAI_API_KEY
   : null
 if (!vision) console.warn('vision disabled: set VISION_MODEL to enable image_describe (ADR-0030)')
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark, vision })
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark, vision, groupProfiles })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
@@ -173,10 +178,22 @@ const posterRender = async (report, html) => {
 const schedulerAgent = process.env.OPENAI_API_KEY
   ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry })
   : undefined
+// 微信日报/周报（DESIGN-wechat-digest.md）：per-user 管道，依赖 WECHAT_LOG_DB
+// 只读挂载。未配置时 digestRunner 为 null，digest 类任务整体跳过（不会退化成
+// 推一条空文本），行为与未加此功能一致——同 lark/vision/wechat_* 的条件启用模式。
+// 与日报共用 schedulerAgent（ADR-0028 的独立队列），不再多开一条队列。
+const digestRunner = wechatLogStore && schedulerAgent ? new WechatDigestRunner({
+  agent: schedulerAgent, wechatLogStore, groupProfiles, memoryStore, reportStore, posterRender,
+  onError: (error, info) => console.warn(`digest ${info?.stage || '?'} failed (${info?.userId || '?'}${info?.chat ? `/${info.chat}` : ''}): ${error?.message || error}`),
+}) : null
+if (!digestRunner) console.warn('wechat digest disabled: needs WECHAT_LOG_DB + OPENAI_API_KEY (DESIGN-wechat-digest.md)')
 const scheduler = schedulerAgent ? new TaskScheduler({
   taskStore, agent: schedulerAgent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender,
   retryMax: Number(process.env.TASK_RETRY_MAX || 3),
   retryIntervalMs: Number(process.env.TASK_RETRY_INTERVAL_MS || 20 * 60_000),
+  digestRunner,
+  // 三节全空时是否发一句"今天各群平静"（DIGEST_QUIET_PUSH=0 则彻底静默）
+  digestQuietPush: process.env.DIGEST_QUIET_PUSH !== '0',
 }) : null
 scheduler?.start()
 
@@ -192,10 +209,12 @@ const groupWatcher = wechatLogStore && agent && process.env.WECHAT_LOG_DB
   : null
 groupWatcher?.start()
 
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark })
+// `taskStore` 进 createApp 是为了 ADR-0031 的"核验通过即默认订阅"——VerificationService
+// 的 onVerified 钩子此前一直没人接，现在由 createApp 内部接上。
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark, taskStore })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
 console.log(`wechat-agent listening on http://${host}:${port}`)
-process.on('SIGTERM', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
-process.on('SIGINT', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); process.exit(0) })
+process.on('SIGTERM', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })
+process.on('SIGINT', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })

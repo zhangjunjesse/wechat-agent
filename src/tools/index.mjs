@@ -12,6 +12,7 @@ import { imageTools } from './image-tools.mjs'
 import { posterTools } from './poster-tools.mjs'
 import { larkTools } from './lark-tools.mjs'
 import { taskTools } from './task-tools.mjs'
+import { groupTagTools } from './group-tag-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -41,7 +42,7 @@ import { taskTools } from './task-tools.mjs'
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, wechatMediaDir, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark, vision = null }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, wechatMediaDir, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark, vision = null, groupProfiles = null }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -82,6 +83,12 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore, root, mediaDir: wechatMediaDir })
     tools.push(wechat.wechatListChats, wechat.wechatSearchChat, wechat.wechatSearchMentions, wechat.wechatSearchMyMessages, wechat.wechatFetchChatFile)
+    // 群画像纠正（DESIGN-wechat-digest.md）：同时需要 groupProfiles（写入）与
+    // wechatLogStore（解析群名 + 权限边界），两者缺一就不注册。
+    if (groupProfiles) {
+      const groupTags = groupTagTools({ groupProfiles, wechatLogStore })
+      tools.push(groupTags.listGroupTags, groupTags.setGroupTag)
+    }
   }
   if (lark?.client) {
     // 飞书文档（ADR-0021）：仅在配置 LARK_APP_ID/SECRET 时注册；redirectUri 供 OAuth 回调

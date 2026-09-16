@@ -147,6 +147,15 @@ export class WechatLogStore {
       })),
     }
   }
+
+  /** Release the underlying SQLite handle. Needed because the file is a
+   * read-only mount owned by another process (wechat-chatlog-dsh) — holding
+   * the handle open blocks nothing in production, but tests that create a
+   * throwaway db file per case must close it before deleting the file, or
+   * Windows refuses the unlink with EBUSY. Safe to call more than once. */
+  close() {
+    try { this.#db.close() } catch { /* already closed */ }
+  }
 }
 
 /** `messages.attachment` 是同步端写入的 JSON 文本，按 kind 归一化成结构化对象

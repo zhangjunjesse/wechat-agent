@@ -3,7 +3,8 @@
 - 状态：**Superseded by [ADR-0014](ADR-0014-timed-tasks.md)**（2026-09-10 实现完成；
   本文保留为设计过程记录。实现覆盖 P0+P1 全部内容，含 anchor 模型到期判定与
   contextToken 缓存；公共任务预置见 `deploy/global-tasks.json`）
-- 关联：ADR-0006（forced skill invocation）、ADR-0013（渐进式技能）、iLink 发送（ADR-0009）
+- 关联：ADR-0006（forced skill invocation）、ADR-0013（渐进式技能）、iLink 发送（ADR-0009）、
+  ADR-0031（「每日早报」已改名为「每日资讯」；下文示例里的「每日早报」读作现在的「每日资讯」）
 - 日期：2026-09-10
 
 ## 问题（与实现无关）

@@ -67,6 +67,52 @@ test('legacy reports table without poster_path column migrates on open', () => {
   }
 })
 
+test('legacy reports table without kind/section columns migrates on open, old data defaults to report/plain (D8, ADR-0031/DESIGN-wechat-digest)', () => {
+  const file = path.join(os.tmpdir(), `rp-old-kind-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  // 复刻 ADR-0027 之后、DESIGN-wechat-digest 之前的真实老库形状：有 poster_path/
+  // user_id/topic，但没有 kind/section——这正是本次要新增迁移覆盖的那道缝。
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE reports (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT '',
+      topic TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, run_at INTEGER NOT NULL,
+      focus TEXT NOT NULL DEFAULT '', raw_text TEXT NOT NULL DEFAULT '', cover_path TEXT NOT NULL DEFAULT '',
+      poster_path TEXT NOT NULL DEFAULT '', items_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE report_items (
+      report_id TEXT NOT NULL, idx INTEGER NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (report_id, idx)
+    );
+  `)
+  db.prepare(`INSERT INTO reports (id, task_id, user_id, topic, name, run_at, focus, raw_text, cover_path, poster_path, items_count, created_at)
+    VALUES ('rp-old', 'global-每日早报', '', '', '每日早报', ?, '老焦点', 'raw', '', '/x/cov.png', 1, ?)`).run(Date.now(), Date.now())
+  db.prepare(`INSERT INTO report_items (report_id, idx, title, summary, source, url, fingerprint) VALUES ('rp-old', 0, '老标题', '老摘要', '老来源', '', 'fp')`).run()
+  db.close()
+
+  const store = new ReportStore({ file })
+  try {
+    // 老数据一字未动：kind 落在迁移的默认值 'report'，section 落在 ''——
+    // 行为与迁移前完全一致（app.mjs 据此路由到每日资讯模板，不是 digest 模板）。
+    const old = store.getReport('rp-old')
+    assert.equal(old.kind, 'report')
+    assert.equal(old.items[0].section, '')
+    assert.equal(old.focus, '老焦点')
+
+    // 迁移后新写入的 digest 报告能正常带 kind + section 落库（新老数据同库共存）。
+    const fresh = store.saveReport({
+      taskId: 'global-微信日报', name: '微信日报', runAt: Date.now(), kind: 'wechat-digest',
+      items: [{ title: '新标题', summary: '', source: '项目群', section: 'action_items' }],
+    })
+    assert.equal(store.getReport(fresh.id).kind, 'wechat-digest')
+    assert.equal(store.getReport(fresh.id).items[0].section, 'action_items')
+    // 老行依旧不受影响
+    assert.equal(store.getReport('rp-old').kind, 'report')
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})
+
 test('reportIdOf differs across days, stable within a day', () => {
   const day1 = Date.UTC(2026, 8, 16, 0, 30)
   const day2 = Date.UTC(2026, 8, 17, 0, 30)

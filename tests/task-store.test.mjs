@@ -246,3 +246,137 @@ test('guide events record shown/converted and stats aggregate the funnel', () =>
     store?.close?.(); fs.rmSync(file, { force: true })
   }
 })
+
+// ---- ADR-0031：公共任务改名迁移 ----
+// upsert 键是 `global-<name>`，所以改名 = 新建一条空任务 + 把老任务连同全部
+// 订阅者晾在库里继续被调度。`renamedFrom` 让"这条就是原来那条"能在声明式配置
+// 里被表达出来。
+
+test('renamedFrom migrates subscribers and scheduling anchors, and drops the old row', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', kind: 'report', cover: true, instruction: '早报v1', createdAt: 1000 }])
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'u2')
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+    store.recordGuideEvent({ userId: 'u1', event: 'guide_shown', entry: 'push', taskName: '每日早报' })
+    store.markRun('global-每日早报', 5000, '')
+
+    store.loadGlobalTasks([{ name: '每日资讯', renamedFrom: '每日早报', schedule: 'daily@08:00', kind: 'report', cover: true, instruction: '资讯v2', createdAt: 9999 }])
+
+    // 旧任务彻底消失（否则它会带着订阅者继续每天推送）
+    assert.equal(store.getTask('global-每日早报'), null)
+    assert.equal(store.listGlobalTasks().length, 1)
+
+    const t = store.getTask('global-每日资讯')
+    assert.equal(t.name, '每日资讯')
+    assert.deepEqual(t.subscribers, ['u1', 'u2']) // 订阅关系完整保留
+    assert.equal(t.createdAt, 1000)               // 不假装自己是今天才存在的
+    assert.equal(t.lastRunAt, 5000)               // 调度锚点保留，改名当天不重复触发
+    assert.equal(t.instruction, '资讯v2')          // 配置侧字段以配置为准
+    assert.equal(t.kind, 'report')
+    assert.equal(t.cover, true)
+
+    // 附属表按 task_name 关联，跟着改名
+    assert.deepEqual(store.getReportTopics('每日资讯', 'u1'), ['AI', '芯片'])
+    assert.deepEqual(store.getReportTopics('每日早报', 'u1'), [])
+    assert.deepEqual(store.listReportTopics('u1'), [{ taskName: '每日资讯', topics: ['AI', '芯片'] }])
+    assert.equal(store.guideStats().shown, 1)
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('the rename migration is idempotent across repeated startups', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'v1', createdAt: 1000 }])
+    store.subscribe('每日早报', 'u1')
+    const config = [{ name: '每日资讯', renamedFrom: '每日早报', schedule: 'daily@08:00', instruction: 'v2', createdAt: 9999 }]
+
+    store.loadGlobalTasks(config)
+    store.subscribe('每日资讯', 'u9') // 改名后新来的订阅者
+    // 每次启动都会跑一遍：第二、三次必须是 no-op，不能吃掉新订阅者
+    store.loadGlobalTasks(config)
+    store.loadGlobalTasks(config)
+
+    const t = store.getTask('global-每日资讯')
+    assert.deepEqual(t.subscribers, ['u1', 'u9'])
+    assert.equal(t.createdAt, 1000)
+    assert.equal(store.listGlobalTasks().length, 1)
+    assert.equal(store.renameGlobalTask('每日早报', '每日资讯'), false) // 旧行早就没了
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('renaming onto an existing task merges the two subscriber sets instead of losing one', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([
+      { name: '每日早报', schedule: 'daily@08:00', instruction: 'old', createdAt: 1000 },
+      { name: '每日资讯', schedule: 'daily@08:00', instruction: 'new', createdAt: 8000 },
+    ])
+    store.subscribe('每日早报', 'u1')
+    store.subscribe('每日早报', 'shared')
+    store.subscribe('每日资讯', 'u2')
+    store.subscribe('每日资讯', 'shared')
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['旧主题'] })
+    store.setReportTopics({ globalName: '每日早报', userId: 'shared', topics: ['旧的'] })
+    store.setReportTopics({ globalName: '每日资讯', userId: 'shared', topics: ['新的'] })
+    store.markRun('global-每日早报', 5000, '')
+    store.markRun('global-每日资讯', 7000, '')
+
+    assert.equal(store.renameGlobalTask('每日早报', '每日资讯'), true)
+
+    const t = store.getTask('global-每日资讯')
+    assert.equal(store.getTask('global-每日早报'), null)
+    assert.deepEqual(t.subscribers.sort(), ['shared', 'u1', 'u2']) // 并集去重
+    assert.equal(t.createdAt, 1000) // 更早的那个
+    assert.equal(t.lastRunAt, 7000) // 更晚的那个
+    // 撞主键时新名下已有的设置胜出；旧行不留孤儿
+    assert.deepEqual(store.getReportTopics('每日资讯', 'shared'), ['新的'])
+    assert.deepEqual(store.getReportTopics('每日资讯', 'u1'), ['旧主题'])
+    assert.deepEqual(store.listReportTopics('u1'), [{ taskName: '每日资讯', topics: ['旧主题'] }])
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('renameGlobalTask is a no-op for unknown, empty or identical names', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日资讯', schedule: 'daily@08:00', instruction: 'v', createdAt: 1000 }])
+    store.subscribe('每日资讯', 'u1')
+    assert.equal(store.renameGlobalTask('从未存在过', '每日资讯'), false)
+    assert.equal(store.renameGlobalTask('', '每日资讯'), false)
+    assert.equal(store.renameGlobalTask('每日资讯', ''), false)
+    assert.equal(store.renameGlobalTask('每日资讯', '每日资讯'), false)
+    assert.deepEqual(store.getTask('global-每日资讯').subscribers, ['u1'])
+    // 配置里 renamedFrom 指向一个从未部署过的旧名 → 正常建新任务
+    store.loadGlobalTasks([{ name: '全新任务', renamedFrom: '不存在的老任务', schedule: 'daily@09:00', instruction: 'x' }])
+    assert.equal(store.getTask('global-全新任务').name, '全新任务')
+    assert.deepEqual(store.getTask('global-全新任务').subscribers, [])
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('global task kinds come from a whitelist so a new kind is not silently downgraded', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([
+      { name: '资讯', schedule: 'daily@08:00', kind: 'report', instruction: 'a' },
+      { name: '微信日报', schedule: 'daily@21:30', kind: 'wechat-digest', instruction: 'b' },
+      { name: '普通', schedule: 'daily@10:00', instruction: 'c' },
+      { name: '拼错了', schedule: 'daily@11:00', kind: 'reportt', instruction: 'd' },
+    ])
+    const byName = Object.fromEntries(store.listGlobalTasks().map((t) => [t.name, t.kind]))
+    assert.equal(byName['资讯'], 'report')
+    assert.equal(byName['微信日报'], 'wechat-digest') // 不被降级成 plain
+    assert.equal(byName['普通'], 'plain')
+    assert.equal(byName['拼错了'], 'plain')           // 未知 kind 降级，不炸
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})

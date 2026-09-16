@@ -8,6 +8,11 @@ import { parseSchedule } from './schedule.mjs'
  * `update_report_topics` 工具描述里的"1-5 个"保持一致。 */
 export const MAX_REPORT_TOPICS = 5
 
+/** 公共任务配置里允许出现的 `kind` 白名单。未知值一律降级成 `'plain'`（ADR-0014
+ * 的逐订阅者行为），配置写错一个字母不会让整条管道以"没人知道为什么"的方式静默
+ * 走错分支。`'wechat-digest'` 见 DESIGN-wechat-digest.md。 */
+const GLOBAL_TASK_KINDS = new Set(['plain', 'report', 'wechat-digest'])
+
 /** 定时任务存储（SQLite，见 DESIGN-timed-tasks.md）。
  *
  * 两类任务：
@@ -109,12 +114,21 @@ export class TaskStore {
 
   /** Upsert global tasks from a config array (deploy/global-tasks.json).
    * Existing subscribers are preserved; schedule/instruction/kind/cover update.
-   * A record may carry `createdAt` (test/backfill) — defaults to now. */
+   * A record may carry `createdAt` (test/backfill) — defaults to now.
+   *
+   * `renamedFrom`（ADR-0031）：公共任务的主键是 `global-<name>`，改个名字就是一条
+   * **全新任务**、老任务连同订阅者一起被晾在库里——配置里声明旧名后，加载时先做
+   * 一次改名迁移（见 `renameGlobalTask`），再走正常 upsert。幂等：迁移完旧行就没了，
+   * 之后每次启动都是 no-op。 */
   loadGlobalTasks(records = []) {
     const now = Date.now()
     for (const r of records) {
       parseSchedule(r.schedule) // validate
+      // 改名迁移必须在 upsert 之前：upsert 会先把新 id 建出来，之后再迁移就变成
+      // "合并两行"而不是"改名一行"（两条路径都支持，但先迁移这条更不容易出错）。
+      if (r.renamedFrom) this.renameGlobalTask(String(r.renamedFrom), String(r.name))
       const id = `global-${r.name}`
+      const kind = GLOBAL_TASK_KINDS.has(r.kind) ? r.kind : 'plain'
       this.#db.prepare(`
         INSERT INTO tasks (id, scope, name, schedule, instruction, enabled, kind, cover, created_at)
         VALUES (?, 'global', ?, ?, ?, ?, ?, ?, ?)
@@ -124,9 +138,62 @@ export class TaskStore {
           enabled = excluded.enabled,
           kind = excluded.kind,
           cover = excluded.cover
-      `).run(id, String(r.name), r.schedule, String(r.instruction || ''), r.enabled !== false ? 1 : 0, r.kind === 'report' ? 'report' : 'plain', r.cover ? 1 : 0, Math.floor(r.createdAt || now))
+      `).run(id, String(r.name), r.schedule, String(r.instruction || ''), r.enabled !== false ? 1 : 0, kind, r.cover ? 1 : 0, Math.floor(r.createdAt || now))
     }
     return this.listGlobalTasks()
+  }
+
+  /** 公共任务改名迁移（ADR-0031）：把 `global-<oldName>` 的**用户侧状态**搬到
+   * `global-<newName>`，然后删掉旧行。
+   *
+   * 为什么需要它：`loadGlobalTasks` 的 upsert 键是 `global-<name>`（`#db` 的
+   * `tasks.id`），改名 = 插入一条全新任务。老任务不在配置里了、但也没人删，
+   * 于是它带着全部 `subscribers` 留在库里继续被 `getAllEnabled()` 调度——用户
+   * 侧的观感是"改了个名字，所有老订阅者一夜之间订的还是旧任务，新任务一个人
+   * 都没有"。迁移的东西按"这是用户的，不是配置的"来划线：
+   *   - `subscribers`  订阅关系（并集，去重）
+   *   - `created_at`   取更早的那个（新任务不该假装自己是今天才存在的）
+   *   - `last_run_at`  取更晚的那个（调度锚点，防止改名当天重复触发一轮）
+   *   - `report_topics` / `guide_events`  这两张附属表按 `task_name` 关联，跟着改
+   * 配置侧字段（schedule/instruction/kind/cover/enabled）**不迁移**——紧接着的
+   * upsert 会用配置里的新值覆盖，迁移它们只会制造"到底以谁为准"的歧义。
+   *
+   * **幂等**：旧行不存在（没部署过旧名、或已经迁移过）直接返回 false，可以每次
+   * 启动都调。返回值 = 这次是否真的搬了东西。
+   *
+   * ⚠️ 不迁移的：`data/reports.db` 里按 `task_id` 归档的历史报告。老 id 的报告
+   * 行原样留着（`/reports/<老 id>` 链接不会失效），代价是改名后近 7 天的去重
+   * 窗口从零开始，可能重复报道一次旧闻；7 天后自愈。详见 ADR-0031。 */
+  renameGlobalTask(oldName, newName) {
+    const from = String(oldName || '')
+    const to = String(newName || '')
+    if (!from || !to || from === to) return false
+    const oldId = `global-${from}`
+    const newId = `global-${to}`
+    const oldRow = this.#db.prepare('SELECT * FROM tasks WHERE id = ?').get(oldId)
+    if (!oldRow) return false // 已迁移过 / 从未存在 → no-op（幂等的关键）
+    const newRow = this.#db.prepare('SELECT * FROM tasks WHERE id = ?').get(newId)
+    if (!newRow) {
+      // 新任务还不存在：直接改名，subscribers/created_at/last_run_at/retry_units
+      // 等整行状态原样跟着走，一条 UPDATE 就够，没有"漏搬某一列"的余地。
+      this.#db.prepare('UPDATE tasks SET id = ?, name = ? WHERE id = ?').run(newId, to, oldId)
+    } else {
+      // 新旧并存（先 upsert 后迁移，或人工建过同名任务）：合并用户侧状态到新行，删旧行。
+      const subs = [...new Set([...safeJson(newRow.subscribers, []), ...safeJson(oldRow.subscribers, [])].map(String))]
+      const createdCandidates = [Number(newRow.created_at) || 0, Number(oldRow.created_at) || 0].filter((n) => n > 0)
+      const createdAt = createdCandidates.length ? Math.min(...createdCandidates) : 0
+      const lastRunAt = Math.max(Number(newRow.last_run_at) || 0, Number(oldRow.last_run_at) || 0)
+      this.#db.prepare('UPDATE tasks SET subscribers = ?, created_at = ?, last_run_at = ? WHERE id = ?')
+        .run(JSON.stringify(subs), Math.floor(createdAt), Math.floor(lastRunAt), newId)
+      this.#db.prepare('DELETE FROM tasks WHERE id = ?').run(oldId)
+    }
+    // 附属表按 task_name 关联。report_topics 主键是 (user_id, task_name)：新名下
+    // 已有该用户的行时 UPDATE 会撞主键，用 OR IGNORE 让"新名已有的设置"胜出，
+    // 剩下的旧行随后删掉（不留孤儿）。
+    this.#db.prepare('UPDATE OR IGNORE report_topics SET task_name = ? WHERE task_name = ?').run(to, from)
+    this.#db.prepare('DELETE FROM report_topics WHERE task_name = ?').run(from)
+    this.#db.prepare('UPDATE guide_events SET task_name = ? WHERE task_name = ?').run(to, from)
+    return true
   }
 
   subscribe(globalName, userId) {
