@@ -384,7 +384,15 @@
   请求体形状/超时/网关错误透传/空内容拒绝/非图片路径零调用/未配置时工具不存在）。
 - 决策：`docs/ADR-0030-vision-image-understanding.md`。
 - 遗留：只做静态图片，视频抽帧/语音转写/文档解析明确不做；不会被自动调用，需 agent 自己
-  判断要不要看图；无结果缓存；生产 `VISION_MODEL` 启用与本次代码部署是否同批，见下方记录。
+  判断要不要看图；无结果缓存。
+- **已部署 + 已启用生产验证**（2026-09-16，同批）：代码随 ADR-0029 一起部署（`docker restart`，
+  两个 ADR 共 4 处代码标记核对通过）；随后 `server.env` 追加 `VISION_MODEL=gpt-5.6-terra`
+  （复用已配置的 `OPENAI_BASE_URL`/`OPENAI_API_KEY`，值核对一致）并 `docker rm + docker run`
+  重建生效（env 变更 `docker restart` 不会重读 env-file）。**容器内真实端到端验证**（不是
+  只查配置）：`image_describe registered: true`；对生产真实媒体文件
+  （`007f189bb818d4a205904fa9.png`，22983 字节）发起真实 `VisionClient.describeImage` 调用，
+  返回结构化、与图片实际内容（表格列名、红框高亮区域等版面细节）吻合的中文描述——不是
+  泛泛而谈，证明模型真的"看"到了图，不只是 HTTP 200。
 
 ## 会话时间感知（ADR-0015）
 
