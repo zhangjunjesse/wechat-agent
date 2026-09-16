@@ -485,14 +485,148 @@ test('one topic failing does not block another topic for the same user (ADR-0027
     store.subscribe('每日早报', 'u1')
     store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
     await scheduler.sweep()
-    // 两条都推送了：AI 是失败话术，芯片是正常海报文案。芯片成功 → 整任务当轮结算
-    // （不会因 AI 那一路失败而把已经成功的芯片也拖进重试循环）。
+    // 两条都推送了：AI 是失败话术，芯片是正常海报文案——一个主题失败不拦住
+    // 另一个主题当轮送达。结算语义已按 ADR-0028 收紧：AI 单元还在等重试，
+    // 任务**不**当轮结算（只有 AI 也成功或耗尽重试次数后才结算），但已成功的
+    // 芯片不会被拖进重试循环重复推送（见下方 ADR-0028 的按单元重试测试）。
     assert.equal(sent.length, 2)
-    assert.ok(store.getTask('global-每日早报').lastRunAt > 0)
-    assert.ok(sent.some((m) => /今天不再重试|系统会自动重试/.test(m.text)))
+    const t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0) // 未结算：AI 单元还挂着
+    assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 1 }])
+    assert.ok(sent.some((m) => /系统会自动重试/.test(m.text)))
     assert.ok(sent.some((m) => /已送达/.test(m.text)))
     assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '芯片' }).length, 1)
     assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' }).length, 0)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---- 按生成单元独立重试（ADR-0028）：ADR-0026 的重试判定是任务级全有全无
+// （"一份都没成功"才重试），ADR-0027 之后一个任务一轮有多个独立生成单元
+// （公共版 + 每个 (用户,主题)），部分成功部分失败几乎必然——一旦有任何单元
+// 成功，失败单元既不被重试，其用户还收到过"系统会自动重试"的虚假承诺。
+// 修法：失败单元记入 tasks.retry_units（跨 tick 持久化），重试轮只重跑挂着的
+// 单元；全部单元成功或耗尽重试次数后任务才整体结算。----
+
+test('partial failure retries only the failed unit; delivered units are never re-pushed (ADR-0028)', async () => {
+  // 3 个生成单元：公共版（u2 无主题）+ u1 的 AI / 芯片两个主题；AI 首轮失败
+  let aiFails = true
+  const calls = []
+  const agent = { respond: async (args) => {
+    calls.push(args)
+    if (/个性化主题：AI/.test(args.text) && aiFails) throw new Error('502 Bad Gateway')
+    const m = /个性化主题：([^。\n]+)/.exec(args.text)
+    const topic = m ? m[1] : ''
+    const items = [
+      { title: `${topic || '公共'}头条`, summary: 's', source: 'src', url: 'https://x.com' },
+      { title: '条目B', summary: 's2', source: 'src2', url: 'https://y.com' },
+      { title: '条目C', summary: 's3', source: 'src3', url: 'https://z.com' },
+    ]
+    return { text: JSON.stringify({ focus: `关注${topic}`, items }) }
+  } }
+  let nowMs = NOW
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1', u2: 'tok-2' }, now: () => nowMs, retryMax: 2, retryIntervalMs: 1000,
+  })
+  try {
+    for (const id of ['u1', 'u2']) profiles.set(id, { userId: id, nickname: 'u' + id, wxid: 'wx-' + id, ilinkUserId: id })
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+
+    // 第 1 轮：3 个单元都跑；AI 失败（收到"会自动重试"，且这个承诺必须兑现），
+    // 公共版/芯片成功送达。任务不结算——不能因为别的单元成功就抛下 AI。
+    await scheduler.sweep()
+    assert.equal(calls.length, 3)
+    assert.equal(sent.length, 3) // u2 公共版 + u1 芯片 + u1 AI 失败话术
+    assert.equal(sent.filter((m) => m.toProviderUserId === 'u2').length, 1)
+    const aiFail = sent.find((m) => m.toProviderUserId === 'u1' && /系统会自动重试/.test(m.text))
+    assert.ok(aiFail, 'AI 单元的失败话术应承诺自动重试（且后面真的会重试）')
+    let t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0) // 未结算：AI 单元还在等重试
+    assert.equal(t.attemptCount, 1)
+    assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 1 }])
+
+    // 第 2 轮（过了 retryIntervalMs，AI 恢复）：只重跑 AI 这一个单元——
+    // 公共版和芯片已送达，不重新生成、更不重复推送。
+    aiFails = false
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls.length, 4) // 只多了 1 次生成
+    assert.equal(calls[3].userId, 'task-global-每日早报-u1-AI')
+    assert.equal(sent.length, 4) // 只多了 1 条推送（AI 成功版）
+    assert.equal(sent.filter((m) => m.toProviderUserId === 'u2').length, 1) // u2 没有被重复打扰
+    assert.match(sent[3].text, /当前主题：AI/)
+    assert.match(sent[3].text, /已送达/)
+    assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' }).length, 1)
+    // 失败单元也成功了 → 任务整体结算，单元状态清空
+    t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0)
+    assert.equal(t.attemptCount, 0)
+    assert.deepEqual(t.retryUnits, [])
+
+    // 结算后不再触发（下次到期是明天）
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls.length, 4)
+    assert.equal(sent.length, 4)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a unit that keeps failing exhausts its own retries, gets the give-up text, then the task settles (ADR-0028)', async () => {
+  // u1 订阅 AI/芯片：AI 一直失败到耗尽，芯片首轮成功（且全程只被推送一次）
+  const calls = []
+  const agent = { respond: async (args) => {
+    calls.push(args)
+    if (/个性化主题：AI/.test(args.text)) throw new Error('502 Bad Gateway')
+    const items = [{ title: '芯片头条', summary: 's', source: 'src', url: 'https://x.com' }, { title: 'B', summary: '' }, { title: 'C', summary: '' }]
+    return { text: JSON.stringify({ focus: '关注', items }) }
+  } }
+  let nowMs = NOW
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, now: () => nowMs, retryMax: 2, retryIntervalMs: 1000,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx-u1', ilinkUserId: 'u1' })
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+
+    // 第 1 轮：芯片成功、AI 失败（第 1 次尝试，承诺自动重试）
+    await scheduler.sweep()
+    assert.equal(calls.length, 2)
+    let t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0)
+    assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 1 }])
+
+    // 第 2 轮：只重跑 AI，仍失败（第 2 次尝试，还有余量，仍是"会自动重试"）
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls.length, 3)
+    t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0)
+    assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 2 }])
+    assert.match(sent[sent.length - 1].text, /系统会自动重试/)
+
+    // 第 3 轮（= retryMax+1 次尝试）：AI 单元重试耗尽——收到"今天不再重试、
+    // 明天再试"的话术，任务整体结算（锚点推到明天），单元状态清空。
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls.length, 4)
+    t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0) // 已结算：所有最初尝试过的单元都成功或耗尽
+    assert.equal(t.attemptCount, 0)
+    assert.deepEqual(t.retryUnits, [])
+    assert.match(sent[sent.length - 1].text, /已重试 3 次仍失败，今天不再重试，明天按计划再试/)
+
+    // 芯片全程只生成 1 次、推送 1 次（没有被 AI 的重试连累重复打扰）
+    assert.equal(calls.filter((c) => c.userId === 'task-global-每日早报-u1-芯片').length, 1)
+    assert.equal(sent.filter((m) => /当前主题：芯片/.test(m.text)).length, 1)
+    assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '芯片' }).length, 1)
+
+    // 结算后当天不再触发
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls.length, 4)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }

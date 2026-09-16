@@ -106,6 +106,35 @@ test('markAttemptFailed advances attempt state without settling; markRun settles
   }
 })
 
+// ADR-0028：报告任务的重试单元状态（跨 tick 持久化）。retry_units 记录本结算
+// 周期内还在等重试的生成单元（公共版 userId=''/topic='' 或某个 (用户,主题)）
+// 及各自尝试次数；setReportRetryUnits 覆写，markRun（整体结算）必须一并清空
+// ——否则昨天的失败单元会泄漏进明天的新周期。
+test('setReportRetryUnits persists per-unit retry state and markRun clears it', () => {
+  const { file, store } = makeStore()
+  try {
+    const t = store.createUserTask({ name: 'x', schedule: 'daily@08:00', instruction: 'i', ownerUserId: 'u1' })
+    assert.deepEqual(store.getTask(t.id).retryUnits, []) // 迁移默认：空数组
+
+    store.setReportRetryUnits(t.id, [{ userId: 'u1', topic: 'AI', attempts: 1 }, { userId: '', topic: '', attempts: 2 }])
+    let after = store.getTask(t.id)
+    assert.equal(after.retryUnits.length, 2)
+    assert.deepEqual(after.retryUnits[0], { userId: 'u1', topic: 'AI', attempts: 1 })
+    assert.deepEqual(after.retryUnits[1], { userId: '', topic: '', attempts: 2 }) // 公共版单元的表示法
+
+    // 覆写为空数组 = 没有单元再等重试
+    store.setReportRetryUnits(t.id, [])
+    assert.deepEqual(store.getTask(t.id).retryUnits, [])
+
+    // 整体结算时清空（双保险：即使调度器忘了先覆写）
+    store.setReportRetryUnits(t.id, [{ userId: 'u1', topic: 'AI', attempts: 3 }])
+    store.markRun(t.id, 3000, '')
+    assert.deepEqual(store.getTask(t.id).retryUnits, [])
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
 test('kind/cover fields persist for report tasks', () => {
   const { file, store } = makeStore()
   try {

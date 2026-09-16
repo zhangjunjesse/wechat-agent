@@ -49,6 +49,12 @@ export class TaskStore {
     // 本结算周期内已尝试次数与时间，供调度器节流重试、判断何时放弃。
     if (!cols.includes('attempt_count')) this.#db.exec('ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0')
     if (!cols.includes('last_attempt_at')) this.#db.exec('ALTER TABLE tasks ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0')
+    // 迁移：按生成单元重试（ADR-0028）。报告任务一轮 = 多个独立生成单元
+    // （公共版 + 每个 (用户,主题)），`retry_units` 记录本结算周期内**还在等重试**
+    // 的单元及各自已尝试次数（JSON 数组，如 [{"userId":"u1","topic":"AI","attempts":1}]，
+    // 公共版单元用 userId=''、topic='' 表示）——跨 tick 持久化，让"部分失败"
+    // 只补跑失败的那几个单元，已成功的用户不被重复推送；结算时清空。
+    if (!cols.includes('retry_units')) this.#db.exec("ALTER TABLE tasks ADD COLUMN retry_units TEXT NOT NULL DEFAULT '[]'")
     // 用户主题订阅（ADR-0019）：per-user，按 user_id 隔离；只对已订阅任务生效。
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS report_topics (
@@ -253,9 +259,9 @@ export class TaskStore {
   }
 
   /** 结算本周期（成功，或重试耗尽放弃）：推进 `last_run_at`（下次调度的锚点）
-   * 并把 `attempt_count` 归零，为下一个周期做准备。 */
+   * 并把 `attempt_count` 归零、清空待重试单元（ADR-0028），为下一个周期做准备。 */
   markRun(id, atMs, error = '') {
-    this.#db.prepare('UPDATE tasks SET last_run_at = ?, last_error = ?, attempt_count = 0 WHERE id = ?').run(Math.floor(atMs), String(error || ''), id)
+    this.#db.prepare("UPDATE tasks SET last_run_at = ?, last_error = ?, attempt_count = 0, retry_units = '[]' WHERE id = ?").run(Math.floor(atMs), String(error || ''), id)
   }
 
   /** 记一次失败尝试但**不**结算（ADR-0026）：`last_run_at` 保持不变，任务仍会
@@ -263,6 +269,14 @@ export class TaskStore {
    * 等到下一个自然周期（第二天）。 */
   markAttemptFailed(id, atMs, error = '') {
     this.#db.prepare('UPDATE tasks SET attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = ? WHERE id = ?').run(Math.floor(atMs), String(error || ''), id)
+  }
+
+  /** 覆写报告任务的待重试单元列表（ADR-0028）：每个元素
+   * `{ userId, topic, attempts }`（公共版单元 userId=''、topic=''）。调度器每轮
+   * 报告执行后调用——传空数组即"本轮没有单元再等重试"；整体结算走 `markRun`
+   * 时也会一并清空，双保险。 */
+  setReportRetryUnits(id, units = []) {
+    this.#db.prepare('UPDATE tasks SET retry_units = ? WHERE id = ?').run(JSON.stringify(Array.isArray(units) ? units : []), id)
   }
 
   #query(sql, params = []) {
@@ -287,6 +301,7 @@ export class TaskStore {
       lastError: row.last_error || '',
       attemptCount: Number(row.attempt_count || 0),
       lastAttemptAt: Number(row.last_attempt_at || 0),
+      retryUnits: safeJson(row.retry_units, []),
     }
   }
 }

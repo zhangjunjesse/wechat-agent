@@ -148,8 +148,19 @@ const posterRender = async (report, html) => {
   const out = path.resolve('data/reports', `${report.id}.png`)
   return renderPoster(html, { width: 750, outPath: out })
 }
-const scheduler = agent ? new TaskScheduler({
-  taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender,
+// 调度器专属 agent 实例（ADR-0028）：AgentsSdkAgent 每实例一条串行执行队列
+// （防并发 run 互踩 DeepSeek thinking 缓存），若与 MessageRouter/GroupCommandWatcher
+// 共用主 `agent`，8 点批量日报生成会把实时聊天/群命令堵在同一条队列后面（订阅
+// 规模上去后忙碌窗口拉长到分钟级）。独立实例 = 独立队列（隔离手法同 ADR-0024
+// 的委派子 agent），但语义不同：这里是**全量工具集**（同主 agent，不是防递归的
+// 受限版），且 `...sessionOpts` 指向同一份 sessionStore/memoryStore——个人定时
+// 任务（#runForUser）写的是用户真实会话历史，数据源必须与实时聊天一致，分开的
+// 只有队列。
+const schedulerAgent = process.env.OPENAI_API_KEY
+  ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry })
+  : undefined
+const scheduler = schedulerAgent ? new TaskScheduler({
+  taskStore, agent: schedulerAgent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender,
   retryMax: Number(process.env.TASK_RETRY_MAX || 3),
   retryIntervalMs: Number(process.env.TASK_RETRY_INTERVAL_MS || 20 * 60_000),
 }) : null

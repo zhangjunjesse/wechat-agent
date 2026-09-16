@@ -25,7 +25,12 @@ import { buildReportPrompt, parseReportJson, dedupeItems, renderReportPoster, re
  * 时才推进；一次完全失败（如 LLM 402/限流）不会让任务静默等到明天——按
  * `retryIntervalMs` 节流、在同一天内重试 `retryMax` 次，仍失败才放弃并如实
  * 告知用户"明天再试"，而不是含糊的"请稍后重试"（其实没人会重试）。
- * 根因见生产事故：8:00 报告因 402 失败，切换模型后无人推动、干等到第二天。 */
+ * 根因见生产事故：8:00 报告因 402 失败，切换模型后无人推动、干等到第二天。
+ *
+ * **报告任务重试按生成单元独立跟踪（ADR-0028）**：ADR-0027 之后一个报告任务
+ * 一轮 = 多个独立生成单元（公共版 + 每个 (用户,主题)），"部分成功部分失败"
+ * 是常态；重试判定从任务级全有全无下沉到单元级（`tasks.retry_units` 跨 tick
+ * 持久化），重试轮只补跑失败单元，已成功的用户不被重复推送。 */
 export class TaskScheduler {
   #taskStore
   #agent
@@ -122,13 +127,16 @@ export class TaskScheduler {
   }
 
   /** Execute a task for every target user; returns { results, retry }.
-   * `retry` = true iff execution was attempted and produced zero successes
-   * (a total failure worth retrying soon) — partial success/failure settles
-   * normally so already-delivered users don't get duplicate pushes. */
+   * 非报告任务：`retry` = true iff execution was attempted and produced zero
+   * successes (a total failure worth retrying soon) — partial success/failure
+   * settles normally so already-delivered users don't get duplicate pushes.
+   * 报告任务：重试判定下沉到生成单元级（ADR-0028，见 #runReportTask）——
+   * `retry` = 还有单元在等重试，重试轮只补跑失败单元，不会重复打扰已成功者。 */
   async #runTask(task, attemptInfo = { attemptNumber: 1, isLastAttempt: true }) {
-    // 报告类公共任务：生成一次 + 扇出投递（DESIGN-daily-report.md）
+    // 报告类公共任务：生成一次 + 扇出投递（DESIGN-daily-report.md）；
+    // 单元级重试状态自持久化（tasks.retry_units），不需要任务级 attemptInfo。
     if (task.scope === 'global' && task.kind === 'report' && this.#reportStore) {
-      return this.#runReportTask(task, attemptInfo)
+      return this.#runReportTask(task)
     }
     const targets = task.scope === 'user' ? [task.ownerUserId] : (task.subscribers || [])
     const results = []
@@ -146,54 +154,75 @@ export class TaskScheduler {
    * 独立生成**个性化版（ADR-0027：订阅 N 个主题就收到 N 份独立海报+推送，不再
    * 合并成一份让模型自己权衡分配——那样用户订阅了多个主题也看不出区别，某个
    * 主题当天还可能被挤到 0 条而不自知）。各自独立生成、独立去重、独立海报。
-   * 返回 { results, retry }：`retry` = 尝试过生成但一份都没成功（如 402/限流），
-   * 值得短间隔重试；只要至少一份成功就不重试（不重复打扰已收到的订阅者）。 */
-  async #runReportTask(task, { attemptNumber = 1, isLastAttempt = true } = {}) {
+   *
+   * **重试按生成单元独立跟踪（ADR-0028）**：单元 = 无主题共享公共版（userId=''、
+   * topic=''）或某个 (用户, 主题)。此前重试判定是任务级全有全无（"一份都没成功"
+   * 才重试），一旦部分成功部分失败，失败单元既不重试、其用户还收到过"系统会
+   * 自动重试"的虚假承诺。现改为：首轮跑全部单元；失败单元连同各自尝试次数写进
+   * `tasks.retry_units`（跨 tick 持久化），重试轮**只重跑还挂着的单元**——已成功
+   * 的用户绝不被重复生成/推送；所有最初尝试过的单元都成功或耗尽重试次数后，
+   * 任务才整体结算（`retry=false` → markRun，锚点推到下一周期并清空单元状态）。
+   * 失败话术按**该单元自己**的重试余量措辞，不拿别的单元的命运替它承诺。 */
+  async #runReportTask(task) {
     const now = this.#now()
     const subscribers = task.subscribers || []
     const topicsByUser = this.#taskStore.reportTopicsByTask(task.name)
     const plainUsers = subscribers.filter((u) => !topicsByUser[u]?.length)
-    const results = []
-    let anyAttempted = false
-    let anySucceeded = false
-
-    // ① 公共版：未设主题的订阅者共享一份（生成一次，不随人数翻倍）
-    if (plainUsers.length) {
-      anyAttempted = true
-      const r = await this.#generateAndStore(task, null, now, '')
-      if (r.ok) {
-        anySucceeded = true
-        for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
-      } else {
-        const text = r.rawText || this.#failureText(task, attemptNumber, isLastAttempt)
-        for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, '', text))
-        results.push({ userId: `task-${task.id}`, error: r.error }) // 公共版失败可观测
-      }
-    }
-
-    // ② 个性化版：每个设了主题的订阅者，**每个主题各自单独生成**一份（互不合并、
-    // 互不串），失败按主题各自降级，不因一个主题失败连累其他主题。
+    // 当前全部生成单元（公共版单元排最前，保持原有执行顺序）
+    const allUnits = []
+    if (plainUsers.length) allUnits.push({ userId: '', topic: '' })
     for (const userId of subscribers.filter((u) => topicsByUser[u]?.length)) {
-      for (const topic of topicsByUser[userId]) {
-        anyAttempted = true
-        const r = await this.#generateAndStore(task, userId, now, topic)
+      for (const topic of topicsByUser[userId]) allUnits.push({ userId, topic })
+    }
+    // 待重试状态：非首轮（retry_units 非空）只重跑还挂着的单元；期间退订/删主题
+    // 导致单元消失的，直接出局（不再属于"最初尝试过的单元"集合的存活部分）。
+    const unitKey = (u) => `${u.userId}\u0000${u.topic}`
+    const pendingBefore = Array.isArray(task.retryUnits) ? task.retryUnits : []
+    const pendingByKey = new Map(pendingBefore.map((u) => [unitKey(u), u]))
+    const toAttempt = pendingBefore.length ? allUnits.filter((u) => pendingByKey.has(unitKey(u))) : allUnits
+    const results = []
+    const nextPending = []
+
+    for (const unit of toAttempt) {
+      // 单元级重试余量：话术与"是否继续挂起"都只看这个单元自己试了几次
+      const unitAttemptNumber = (pendingByKey.get(unitKey(unit))?.attempts || 0) + 1
+      const unitIsLast = unitAttemptNumber >= this.#retryMax + 1
+      if (!unit.userId) {
+        // ① 公共版：未设主题的订阅者共享一份（生成一次，不随人数翻倍）
+        const r = await this.#generateAndStore(task, null, now, '')
         if (r.ok) {
-          anySucceeded = true
-          results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report, [topic])))
+          for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
         } else {
-          const text = r.rawText || this.#failureText(task, attemptNumber, isLastAttempt)
-          results.push(await this.#fanoutReport(task, userId, '', text))
-          results.push({ userId: `task-${task.id}-${userId}-${topic}`, error: r.error }) // 个性化失败可观测（按主题定位）
+          const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+          for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, '', text))
+          results.push({ userId: `task-${task.id}`, error: r.error }) // 公共版失败可观测
+          if (!unitIsLast) nextPending.push({ userId: '', topic: '', attempts: unitAttemptNumber })
+        }
+      } else {
+        // ② 个性化版：每个 (用户, 主题) 各自单独生成一份（互不合并、互不串），
+        // 失败按主题各自降级，不因一个主题失败连累其他主题。
+        const r = await this.#generateAndStore(task, unit.userId, now, unit.topic)
+        if (r.ok) {
+          results.push(await this.#fanoutReport(task, unit.userId, r.report.posterPath, this.#pushText(r.report, [unit.topic])))
+        } else {
+          const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+          results.push(await this.#fanoutReport(task, unit.userId, '', text))
+          results.push({ userId: `task-${task.id}-${unit.userId}-${unit.topic}`, error: r.error }) // 个性化失败可观测（按主题定位）
+          if (!unitIsLast) nextPending.push({ userId: unit.userId, topic: unit.topic, attempts: unitAttemptNumber })
         }
       }
     }
 
-    return { results, retry: anyAttempted && !anySucceeded }
+    // 落盘待重试单元（空数组 = 本周期不再有单元等重试）；整体结算时 markRun 还会再清一次
+    this.#taskStore.setReportRetryUnits(task.id, nextPending)
+    return { results, retry: nextPending.length > 0 }
   }
 
   /** 生成失败时推给用户的话术：还有重试机会就如实说"会自动重试"，重试耗尽就
    * 明说"今天放弃、明天再来"——不再用含糊的"请稍后重试"（其实没人会重试，
-   * 用户只会干等或来问）。 */
+   * 用户只会干等或来问）。报告任务传入的是**该生成单元自己**的尝试次数/余量
+   * （ADR-0028）：说"会自动重试"就必须真的会重试这个单元，不能拿任务级或
+   * 别的单元的状态替它承诺。 */
   #failureText(task, attemptNumber, isLastAttempt) {
     if (isLastAttempt) {
       return `【定时任务「${task.name}」】已重试 ${attemptNumber} 次仍失败，今天不再重试，明天按计划再试。`
