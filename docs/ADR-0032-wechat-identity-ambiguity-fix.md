@@ -43,18 +43,44 @@ wxid 匹配与昵称匹配是**并列的 OR**，两条路等价可信——隐�
 
 核验链路（`VerificationService` → `RemoteWechatVerifier.checkTask` →
 `findAssistantCode`）从"用户发到助手的验证码消息"里取 `sender_wxid` 当作这个人
-的 wxid。但 `findAssistantCode` 只读消息**行本身**的 `sender_wxid` 字段——而
-ADR-0007 自己的记录已经点出：1:1 私聊的身份标识本来就是**那个会话的
-`chat_wxid`**（"用户自己的 wxid 本身就是他们私聊线程的标识"），消息级
-`sender_wxid` 对 1:1 场景是冗余信息。据此推断（无法访问 `wechat-chatlog-dsh`
-仓库源码验证，见"遗留风险"）：同步侧大概率只在**群聊**里认真解析每条消息的
-`sender_wxid`（群里必须靠它区分发言人），1:1 场景则把这件事完全交给
-`chat_wxid`，消息行的 `sender_wxid` 经常留空——这与生产 7/7 全空的实测完全吻合。
+的 wxid。但 `findAssistantCode` 只读消息**行本身**的 `sender_wxid` 字段。
 
-`messages` 表的 `chat_wxid` 列本身有明确、已用真实数据核对过的语义（ADR-0007
-§1）：非群聊（`is_group=0`）的 `chat_wxid` 就是对方的真实 wxid。群聊
-（`@chatroom` 后缀，`wechat-chatlog-dsh` 的既有约定，`tests/*.test.mjs` 里随处
-可见）的 `chat_wxid` 则是群 id，绝不是任何个人的 wxid。
+**根因已用生产 API 实测确证（2026-09-16，见下）**：`RemoteWechatVerifier` 读的
+不是本地 sqlite 库，而是同步端的 HTTP API `/wechat-api/messages`；**该接口的
+响应里根本没有 `sender_wxid` 这个字段**。所以 `match.sender_wxid` 恒为
+`undefined`，落到 `|| ''`，profile 的 wxid 必然为空——与生产 7/7 全空完全吻合。
+
+注意区分两个数据源，它们的字段集**不一致**：
+
+| 数据源 | 消费者 | 有 `sender_wxid` 吗 |
+|---|---|---|
+| 本地 sqlite `sync_inbox.db`（只读挂载） | `WechatLogStore`、回填脚本 | **有**（回填 dry-run 实测 8/8 命中） |
+| HTTP `/wechat-api/messages` | `RemoteWechatVerifier` | **没有**（字段只有 `ts`/`sender`/`sender_display`/`msg_type`/`content`/`attachment`） |
+
+ADR-0007 的既有结论仍然成立且是本记录兜底方案的依据：1:1 私聊的
+`chat_wxid` 就是对方的真实 wxid；群聊（`@chatroom` 后缀）的 `chat_wxid` 是群
+id，绝不是任何个人的 wxid。
+
+> 本条曾错误地推断为"同步侧只在群聊里解析 `sender_wxid`，1:1 留空"。该推断已被
+> 生产 API 实测推翻——字段是**整个接口都没有**，与是不是群聊无关。结论（用
+> `chat_wxid` 兜底）不变，理由更正如上。**真正的上游修法**是让
+> `wechat-chatlog-dsh` 的 `/wechat-api/messages` 也吐出 `sender_wxid`（数据本来
+> 就在它自己的库里）；那属于另一个仓库，不在本记录范围内，在此登记为待办。
+
+### 3. 实测：核验必然走候选循环，所以 `chat_wxid` 兜底确实会生效
+
+`checkTask` 先找 `chat_display` 含"助手"的会话，找不到才进候选循环。生产
+`/wechat-api/chats` 里**确实存在**这样一个会话（`chat_wxid=wxid_6y9h8ldxbe2p22`，
+`chat_display="助手"`），所以第一步不会 `assistant_not_found` 直接退出。
+
+但**用户的验证码不会出现在那个会话里**：用户是把验证码发给助手账号的，从被同步
+账号（就是助手自己）的视角看，这条消息落在**用户自己的 1:1 会话**里
+（如 `chat_wxid=zj391504704`、`chat_display="Z.俊"`，已在生产 API 响应中确认存
+在）。所以第一次查找必然 miss，核验**必然落进候选循环**——而候选循环正是本记录
+传 `chatWxid` 的那一段。结论：新用户核验会拿到正确的 wxid。
+
+这条路径依赖"用户的 1:1 会话出现在 `/wechat-api/chats` 里"，而用户既然刚给助手
+发过验证码，该会话必然在列表中——这个前提由核验动作本身保证。
 
 ## 决策
 
@@ -201,12 +227,11 @@ const matched = profiles.filter((p) =>
   掌握）。查不到就只能停在昵称降级——如果这个昵称后来又撞上了别的新核验用户，
   会从"能看自己的群"退化成"拒绝返回"。这是本记录明确接受的代价：宁可退化成
   拒绝，也不做无凭据的猜测。
-- **`sender_wxid` 在 1:1 场景经常为空的具体原因，是根据 ADR-0007 已有记录 +
-  生产实测数据反推的，未能拿到 `wechat-chatlog-dsh` 仓库的 `receiver.py`/
-  `sync_push.py` 源码逐行核实**（本次改动的实施环境无法访问该仓库）。如果
-  未来接触到那个仓库、发现真实原因不同（比如是某个版本的回归 bug，而不是设计
-  如此），`chatWxid` 兜底仍然成立（`chat_wxid` 语义是 ADR-0007 已用真实数据核
-  对过的独立结论），但"为什么生产是这样"这条推断需要重新核实。
+- ~~`sender_wxid` 为空的原因未经核实~~ → **已核实并更正**（见"问题 §2"）：
+  原因是 HTTP `/wechat-api/messages` 接口**不返回该字段**，与是否群聊无关。
+  上游正解是让 `wechat-chatlog-dsh` 的该接口补上 `sender_wxid`（数据就在它自己
+  的库里）；在上游修好之前，本记录的 `chat_wxid` 兜底是这一侧唯一能做的事。
+  **登记为跨仓待办**，不在本仓库范围内。
 - **`GroupCommandWatcher` 的修复同样依赖 `profiles.wxid` 被正确填充**：在回填
   脚本实际跑过生产数据之前，群消息的 `sender_wxid` 匹配大概率因为
   `profile.wxid` 仍是空字符串而落不到 `byWxid` 分支，行为等价于全员走昵称降级
@@ -217,12 +242,11 @@ const matched = profiles.filter((p) =>
   验证，`--apply` 真实写 `data/profiles.json` 的路径未经真实数据验证。上生产前
   应该先 dry-run 跑一遍、人工核对打印的"依据"（chat_wxid/时间戳/消息片段）再
   决定是否 `--apply`。
-- **核验链路的 `chatWxid` 兜底未经生产端到端验证**：`RemoteWechatVerifier`
-  连的是远端 HTTP API（`/wechat-api/messages`），本记录假设该接口返回的消息行
-  字段形状与聊天库 `messages` 表一致（含 `sender_wxid` 可能为空的行为）——这个
-  假设基于同一个 `receiver.py` 是两者共同的权威来源（ADR-0007 已有的架构结论），
-  但没有对生产 API 实际发一次新用户核验去验证下一个新核验的 profile 真的会带
-  上非空 wxid。
+- **核验链路的 `chatWxid` 兜底仍未做真实端到端核验**：接口字段形状与"必然走候选
+  循环"都已用生产 API 实测确认（见"问题 §2/§3"），但**没有真的拉一个新用户走一
+  遍核验**去确认落库的 profile 真的带上了非空 wxid——那需要真人在微信里发一次
+  验证码。下一个新用户注册时应该主动检查 `profiles.json` 里他的 `wxid` 是否非
+  空；若仍为空，说明候选循环的实际行为与本记录推断不符，需回来更正。
 - **`node --test "tests/*.test.mjs"` 的执行情况**：已实跑，
   `node --test --test-concurrency=1 "tests/*.test.mjs"` → **449/449 通过，
   exit 0，36s**。注意必须加 `--test-concurrency=1`：默认并行下
