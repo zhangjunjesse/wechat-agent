@@ -33,7 +33,7 @@ import { taskTools } from './task-tools.mjs'
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore, lark }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -62,10 +62,12 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     tools.push(manage.manageSkill)
   }
   if (taskStore) {
-    const tasks = taskTools({ taskStore, reportStore })
+    const tasks = taskTools({ taskStore, reportStore, provider, reportUrl })
     tools.push(tasks.createTask, tasks.listMyTasks, tasks.deleteTask, tasks.listGlobalTasks, tasks.subscribeTask, tasks.unsubscribeTask)
     tools.push(tasks.updateReportTopics, tasks.listReportTopics)
-    if (reportStore) tools.push(tasks.getDailyReport)
+    // resend_daily_report 也随 reportStore 门控（ADR-0026）：子 agent 走
+    // taskStore:null/reportStore:null 的受限工具集，这两个都不会被注册。
+    if (reportStore) tools.push(tasks.getDailyReport, tasks.resendDailyReport)
   }
   if (wechatLogStore) {
     const wechat = wechatTools({ wechatLogStore })

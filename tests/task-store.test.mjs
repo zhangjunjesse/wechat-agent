@@ -72,6 +72,40 @@ test('markRun records last run and error', () => {
   }
 })
 
+// ADR-0026：失败重试状态。生产事故——8:00 报告因 402 失败，lastRunAt 照样被推
+// 进"今天"，调度器据此算出"下次 = 明天"，没人推动重试。新状态机把
+// "尝试"和"结算"分开：markAttemptFailed 不动 lastRunAt（任务仍"到期"，供
+// 调度器节流重试），markRun 才是结算（成功，或重试耗尽放弃），并把
+// attemptCount 归零迎接下一周期。
+test('markAttemptFailed advances attempt state without settling; markRun settles and resets it', () => {
+  const { file, store } = makeStore()
+  try {
+    const t = store.createUserTask({ name: 'x', schedule: 'daily@08:00', instruction: 'i', ownerUserId: 'u1' })
+    assert.equal(store.getTask(t.id).attemptCount, 0)
+    assert.equal(store.getTask(t.id).lastAttemptAt, 0)
+
+    store.markAttemptFailed(t.id, 1000, '402 Insufficient Balance')
+    let after = store.getTask(t.id)
+    assert.equal(after.attemptCount, 1)
+    assert.equal(after.lastAttemptAt, 1000)
+    assert.equal(after.lastError, '402 Insufficient Balance')
+    assert.equal(after.lastRunAt, 0) // 未结算：调度锚点不动，任务仍"到期"
+
+    store.markAttemptFailed(t.id, 2000, '402 Insufficient Balance')
+    after = store.getTask(t.id)
+    assert.equal(after.attemptCount, 2)
+    assert.equal(after.lastAttemptAt, 2000)
+
+    // 结算（无论成功还是重试耗尽放弃）：lastRunAt 推进，attemptCount 归零
+    store.markRun(t.id, 3000, '')
+    after = store.getTask(t.id)
+    assert.equal(after.lastRunAt, 3000)
+    assert.equal(after.attemptCount, 0)
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
 test('kind/cover fields persist for report tasks', () => {
   const { file, store } = makeStore()
   try {

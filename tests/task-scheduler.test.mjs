@@ -119,7 +119,11 @@ test('send failures are aggregated into lastError', async () => {
     profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx1', ilinkUserId: 'u1' })
     await scheduler.sweep()
     const t = store.getTask('user-u1-早报')
+    // 已结算（不是重试挂起）：这是投递失败（会话过期），不是生成失败——重试
+    // 生成解决不了会话过期的问题，所以不该占 attemptCount/白耗 LLM 调用
+    // （ADR-0026：区分"生成失败"与"投递失败"）。
     assert.ok(t.lastRunAt > 0)
+    assert.equal(t.attemptCount, 0)
     assert.match(t.lastError, /iLink 401 过期/)
   } finally {
     store?.close?.(); fs.rmSync(file, { force: true })
@@ -138,7 +142,7 @@ const REPORT_JSON = JSON.stringify({
   ],
 })
 
-function setupReport({ agent, subscribers = {}, posterRender = null, provider = null } = {}) {
+function setupReport({ agent, subscribers = {}, posterRender = null, provider = null, now = () => NOW, retryMax = 3, retryIntervalMs = 20 * 60_000 } = {}) {
   const file = path.join(os.tmpdir(), `sch-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
   const store = new TaskStore({ file })
   const reportStore = new ReportStore({ file: file + '.rep.db' })
@@ -152,7 +156,7 @@ function setupReport({ agent, subscribers = {}, posterRender = null, provider = 
   const tokens = new ContextTokenCache({ file: file + '.ctx.json', flushDelayMs: 60000 })
   for (const [uid, tok] of Object.entries(subscribers)) tokens.update(uid, { contextToken: tok, providerBotId: 'bot-1' })
   const root = path.join(os.tmpdir(), `sch-root-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  const scheduler = new TaskScheduler({ taskStore: store, agent, provider: realProvider, profileStore, contextTokens: tokens, now: () => NOW, reportStore, reportUrl: (id) => `https://reports.local/${id}`, posterRender })
+  const scheduler = new TaskScheduler({ taskStore: store, agent, provider: realProvider, profileStore, contextTokens: tokens, now, reportStore, reportUrl: (id) => `https://reports.local/${id}`, posterRender, retryMax, retryIntervalMs })
   store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: '生成早报', kind: 'report', createdAt: CREATED }])
   for (const uid of Object.keys(subscribers)) store.subscribe('每日早报', uid) // 订阅者真正入订阅列表
   return { file, root, store, reportStore, scheduler, sent, sentImgs, profiles }
@@ -282,6 +286,90 @@ test('poster image is sent before the short text; poster failure degrades to tex
     s3.store?.close?.(); s3.reportStore?.close?.(); fs.rmSync(s3.file, { force: true }); fs.rmSync(s3.file + '.rep.db', { force: true }); fs.rmSync(s3.root, { recursive: true, force: true })
   }
 })
+
+// ---- 失败重试（ADR-0026）：生产事故——8:00 报告因 402 失败，lastRunAt 照样被
+// 推进到"今天"，调度器算出下次=明天，切换模型修好问题后也没人推动重试，
+// 干等一整天。修法：失败不结算，按 retryIntervalMs 节流、当天重试 retryMax 次，
+// 全部失败才放弃并如实告知"明天再来"。----
+
+test('report generation failure retries with backoff, then gives up for the day and settles', async () => {
+  let calls = 0
+  const agent = { respond: async () => { calls++; throw new Error('402 Insufficient Balance') } }
+  let nowMs = NOW
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, now: () => nowMs, retryMax: 2, retryIntervalMs: 1000,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+
+    // 第 1 次尝试：失败，不结算（lastRunAt 仍是 0，任务仍"到期"），措辞是"会自动重试"
+    await scheduler.sweep()
+    assert.equal(calls, 1)
+    let t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0)
+    assert.equal(t.attemptCount, 1)
+    assert.equal(sent.length, 1)
+    assert.match(sent[0].text, /系统会自动重试/)
+
+    // 节流：还没到 retryIntervalMs，立刻再 sweep 不会重试（不浪费一次 LLM 调用）
+    await scheduler.sweep()
+    assert.equal(calls, 1)
+    assert.equal(sent.length, 1)
+
+    // 过了 retryIntervalMs：第 2 次尝试，仍失败，仍未结算
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls, 2)
+    t = store.getTask('global-每日早报')
+    assert.equal(t.lastRunAt, 0)
+    assert.equal(t.attemptCount, 2)
+    assert.match(sent[1].text, /系统会自动重试/)
+
+    // 第 3 次尝试（= retryMax+1）：仍失败——这是最后一次机会，放弃并结算，
+    // 话术改说"今天不再重试，明天按计划再试"（不再是没人会照做的"请稍后重试"）
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls, 3)
+    t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0) // 已结算
+    assert.equal(t.attemptCount, 0) // 归零，迎接下一个自然周期
+    assert.match(sent[2].text, /已重试 3 次仍失败，今天不再重试，明天按计划再试/)
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 0) // 全程没有一份生成成功
+
+    // 结算后不会再触发（下次到期是明天）
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls, 3)
+    assert.equal(sent.length, 3)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('report generation succeeding on a retry settles immediately with the normal push text', async () => {
+  let calls = 0
+  const agent = { respond: async () => { calls++; if (calls === 1) throw new Error('502 Bad Gateway'); return { text: REPORT_JSON } } }
+  let nowMs = NOW
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, now: () => nowMs, retryMax: 3, retryIntervalMs: 1000,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    assert.equal(store.getTask('global-每日早报').attemptCount, 1)
+    nowMs += 1000
+    await scheduler.sweep()
+    assert.equal(calls, 2)
+    const t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0)
+    assert.equal(t.attemptCount, 0)
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 1)
+    assert.match(sent[sent.length - 1].text, /已送达/) // 成功用的是正常措辞，不是失败话术
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 
 test('report topics: per-user personalized runs are isolated and never shared (ADR-0019)', async () => {
   const calls = []

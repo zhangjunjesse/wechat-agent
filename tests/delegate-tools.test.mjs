@@ -135,6 +135,7 @@ test('subagent tool set is restricted: can deliver/progress, cannot delegate aga
     assert.ok(!names.includes('create_task'))
     assert.ok(!names.includes('subscribe_task'))
     assert.ok(!names.includes('get_daily_report'))
+    assert.ok(!names.includes('resend_daily_report')) // ADR-0026: 同一开关，子 agent 不该拿到
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

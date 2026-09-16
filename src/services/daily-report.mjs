@@ -7,8 +7,10 @@ import { fingerprintOf } from './report-store.mjs'
  *   - buildReportPrompt   ：把任务指令包装成带日期/范围/去重清单/JSON schema 的生成 prompt
  *   - parseReportJson      ：从 agent 回复中抽取并校验结构化 JSON
  *   - dedupeItems          ：与近 7 天指纹比对，机械去重（保底 ≥3 条）
- *   - renderWeChatDigest   ：微信推送的精简摘要文本
+ *   - renderWeChatDigest   ：微信推送的精简摘要文本（历史遗留，当前推送路径未使用，见下）
  *   - renderReportPage     ：移动端优先的响应式公网页面（内联 CSS 零依赖）
+ *   - renderPushText       ：海报长图配套的短描述（ADR-0026：原始推送与"补发"共用同一份
+ *     纯函数措辞，杜绝 LLM 现场编排导致丢图/夹 Markdown/带裸链接）
  */
 
 const WEEK = '日一二三四五六'
@@ -108,6 +110,17 @@ export function renderWeChatDigest({ report, reportUrl = '', greeting = '' }) {
   if (reportUrl) lines.push(`📄 完整版：${reportUrl}`)
   lines.push('💬 想深入了解某条？回复我「第N条展开讲讲」即可。')
   return lines.join('\n')
+}
+
+/** 海报长图配套的短描述——报告名 + 公网 URL + 主题/订阅引导（ADR-0026）。
+ * **原始推送**（task-scheduler `#pushText`）和**补发**（resend_daily_report 工具）
+ * 必须共用这一个纯函数：补发是真事故的根因之一——此前补发走 LLM 现场编排文本，
+ * 结果丢了图、夹了 Markdown（微信不渲染 `#`/`**`）、还带了裸链接。
+ * `resend=true` 时措辞标注"补发"，避免用户把旧日期内容误当成当天新推送。 */
+export function renderPushText(report, { reportUrl = '', topics = [], resend = false } = {}) {
+  const topicLine = topics.length ? `当前主题：${topics.join('、')} · ` : ''
+  const head = resend ? `🔁 ${report.name}（补发）` : `📰 ${report.name} 已送达`
+  return `${head}\n想了解每条详情或回看历史，请访问：\n${reportUrl}\n${topicLine}想定制感兴趣的主题？回复「订阅 AI 主题」即可\n也可以回复我「第N条展开讲讲」，我帮你细说。`
 }
 
 /** 移动端优先的响应式公网页面（内联 CSS，风格对齐 ui-page）。 */

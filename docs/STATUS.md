@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **330/330 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **336/336 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -252,6 +252,33 @@
     root 需 `--no-sandbox`。
   - 已知小瑕疵：海报曾含 emoji（📰/🎯）在容器缺 emoji 字体时为方框 → 已改纯文字/CSS
     图标，明天 08:00 轮生效；今日已发海报主体正常。
+
+## 日报可靠性修复（ADR-0026，2026-09-16）
+
+- 事故（双重）：① 8:00 报告因 `402 Insufficient Balance`（切模型网关前的旧账号
+  欠费）失败，调度器把失败也当结算处理，`last_run_at` 推进到"今天"，模型切换
+  修好问题后**没有任何机制推动重试**，用户当天彻底没收到早报；② 用户说"日报
+  补发一下"，agent 把它路由到为"追问细节"设计的 `get_daily_report`（纯文本工具），
+  模型自己现编了一整段回复——旧日期内容、夹 Markdown（微信不渲染，裸符号见客）、
+  每条带原文裸链接，"图+短描述"设计被完全绕开。
+- 修法 1（调度失败重试）：`TaskStore` 新增 `attempt_count`/`last_attempt_at`，
+  `markRun`（结算：推进锚点+归零计数）与 `markAttemptFailed`（只记尝试，不结算，
+  任务仍"到期"）分离；调度器按 `retryIntervalMs`（默认 20 分钟）节流、当天最多
+  `retryMax`（默认 3）次重试，全失败才放弃等明天；区分**生成失败**（值得重试）与
+  **投递失败**如会话过期（重试没用，不占预算，直接结算，省无意义的 LLM 调用）；
+  失败话术如实反映"会自动重试"或"今天放弃、明天再来"，不再是没人会照做的
+  "请稍后重试"。
+- 修法 2（补发不给模型现编的机会）：新增 `resend_daily_report` 工具，直接调
+  `provider.sendImage`+`sendText` 重发**真实存过的海报文件+标准短描述**；短
+  描述提取为共享纯函数 `renderPushText(report,{reportUrl,topics,resend})`，原始
+  推送与补发共用同一份措辞，不再各写一套。`get_daily_report` 收窄为"只答细节"，
+  去掉条目原文裸链接，description 里明确指向 `resend_daily_report`。
+- 验证：`node --test tests/*.test.mjs` → **336/336 全绿**（新增 6：失败重试到
+  放弃结算的完整生命周期、重试中途成功即结算、生成/投递失败区分、
+  `resend_daily_report` 真发图+文、降级/拒绝分支、`renderPushText` 两种变体）。
+- 决策：`docs/ADR-0026-report-reliability.md`。
+- 遗留：9/16 当天报告的旧失败记录发生在新代码部署前，新的重试逻辑不会自动
+  追溯重跑，需要一次手动触发补齐（见部署记录）。
 
 ## 会话时间感知（ADR-0015）
 

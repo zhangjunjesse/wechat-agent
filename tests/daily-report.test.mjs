@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, renderReportPoster, normalizeFocus } from '../src/services/daily-report.mjs'
+import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, renderReportPoster, renderPushText, normalizeFocus } from '../src/services/daily-report.mjs'
 import { fingerprintOf } from '../src/services/report-store.mjs'
 
 test('buildReportPrompt carries task, dedup list and JSON schema (no cover instruction)', () => {
@@ -92,6 +92,25 @@ test('renderWeChatDigest contains items, focus and report URL', () => {
   assert.match(t, /https:\/\/h\.example\/reports\/rp-x/)
   assert.match(t, /第N条展开讲讲/)
   assert.match(t, /9月16日/)
+})
+
+// ADR-0026：原始推送（task-scheduler #pushText）与补发（resend_daily_report 工具）
+// 必须共用这一份纯函数措辞——事故是"补发"绕开它、让模型自己现编了一段文字。
+test('renderPushText: original push vs resend variant, both carry the URL and no raw item content', () => {
+  const report = { id: 'rp-x', name: '每日早报', runAt: Date.now() }
+  const original = renderPushText(report, { reportUrl: 'https://h.example/reports/rp-x' })
+  assert.match(original, /📰 每日早报 已送达/)
+  assert.match(original, /https:\/\/h\.example\/reports\/rp-x/)
+  assert.match(original, /第N条展开讲讲/)
+  assert.doesNotMatch(original, /补发/)
+
+  const resent = renderPushText(report, { reportUrl: 'https://h.example/reports/rp-x', resend: true })
+  assert.match(resent, /🔁 每日早报（补发）/)
+  assert.match(resent, /https:\/\/h\.example\/reports\/rp-x/)
+  assert.doesNotMatch(resent, /已送达/)
+
+  const withTopics = renderPushText(report, { reportUrl: 'x', topics: ['AI', '芯片'] })
+  assert.match(withTopics, /当前主题：AI、芯片/)
 })
 
 test('renderReportPage is responsive HTML with escaped content', () => {

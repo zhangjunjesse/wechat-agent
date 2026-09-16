@@ -88,7 +88,9 @@ test('get_daily_report returns the latest report only for subscribed/owned tasks
     const out = await call(tools.getDailyReport, {}, ctx('u1'))
     assert.match(out, /T1/)
     assert.match(out, /S1/)
-    assert.match(out, /https:\/\/a\.com/)
+    // 不带裸链接（ADR-0026：对齐海报"来源不放裸 URL"的规矩，追问细节该配合
+    // gzh_content 抓正文，而不是把原文链接甩给用户）
+    assert.doesNotMatch(out, /https:\/\/a\.com/)
     assert.match(out, /关注点X/)
     const out2 = await call(tools.getDailyReport, { name: '每日早报' }, ctx('u1'))
     assert.match(out2, /T2/)
@@ -133,6 +135,83 @@ test('update/list report topics are per-user and gated on subscription', async (
     const out = await call(tools.getDailyReport, {}, ctx('u1'))
     assert.match(out, /我的个性化条/)
     assert.doesNotMatch(out, /公共条/)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
+  }
+})
+
+// resend_daily_report（ADR-0026）：真事故——"日报补发一下"曾被路由到
+// get_daily_report，模型自己现编了一段带 Markdown、带裸链接、没有图的回复。
+// 这个工具必须自己调 provider 发图+发文字，不给模型现场编排的机会。
+test('resend_daily_report resends the actual poster image + short text via provider', async () => {
+  const file = path.join(os.tmpdir(), `tk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const repFile = file + '.rep.db'
+  const posterFile = path.join(os.tmpdir(), `poster-${Date.now()}.png`)
+  const store = new TaskStore({ file })
+  const reportStore = new ReportStore({ file: repFile })
+  const sent = { images: [], texts: [] }
+  const provider = {
+    sendImage: async (a) => { sent.images.push(a) },
+    sendText: async (a) => { sent.texts.push(a) },
+  }
+  const reportUrl = (id) => `https://h.example/reports/${id}`
+  const tools = taskTools({ taskStore: store, reportStore, provider, reportUrl })
+  const channel = { providerBotId: 'bot1', toProviderUserId: 'u1', contextToken: 'tok' }
+  const ctx = (userId = 'u1') => ({ context: { userId, channel } })
+  try {
+    fs.writeFileSync(posterFile, Buffer.from('fake-png-bytes'))
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    store.subscribe('每日早报', 'u1')
+    const saved = reportStore.saveReport({
+      taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), posterPath: posterFile,
+      items: [{ title: 'T1', summary: 'S1' }],
+    })
+    const out = await call(tools.resendDailyReport, {}, ctx('u1'))
+    assert.match(out, /已重新发送/)
+    assert.equal(sent.images.length, 1)
+    assert.equal(sent.images[0].fileName, path.basename(posterFile))
+    assert.deepEqual(sent.images[0].buffer, Buffer.from('fake-png-bytes'))
+    assert.equal(sent.images[0].contextToken, 'tok')
+    assert.equal(sent.texts.length, 1)
+    // 短描述必须是 renderPushText 的产物：带公网链接、标注"补发"，不是模型现编的内容
+    assert.match(sent.texts[0].text, /🔁 每日早报（补发）/)
+    assert.match(sent.texts[0].text, new RegExp(`https://h\\.example/reports/${saved.id}`))
+    // 不该出现整段条目正文（工具不把内容摆进聊天，靠图+链接）
+    assert.doesNotMatch(sent.texts[0].text, /T1/)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true }); fs.rmSync(posterFile, { force: true })
+  }
+})
+
+test('resend_daily_report degrades to text-only when the poster file is missing, and rejects unsubscribed/unready cases', async () => {
+  const file = path.join(os.tmpdir(), `tk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const repFile = file + '.rep.db'
+  const store = new TaskStore({ file })
+  const reportStore = new ReportStore({ file: repFile })
+  const sent = { images: [], texts: [] }
+  const provider = { sendImage: async (a) => { sent.images.push(a) }, sendText: async (a) => { sent.texts.push(a) } }
+  const channel = { providerBotId: 'bot1', toProviderUserId: 'u1', contextToken: 'tok' }
+  const ctx = (userId = 'u1') => ({ context: { userId, channel } })
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    store.subscribe('每日早报', 'u1')
+    // 没有报告：明确说明，不是"未启用"
+    const tools = taskTools({ taskStore: store, reportStore, provider })
+    assert.match(await call(tools.resendDailyReport, {}, ctx('u1')), /未找到报告，无法补发/)
+    // posterPath 指向不存在的文件 → 降级为纯文字，不整体失败
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), posterPath: '/nope/missing.png', items: [{ title: 'T1' }] })
+    const degraded = await call(tools.resendDailyReport, {}, ctx('u1'))
+    assert.match(degraded, /没有保存海报图/)
+    assert.equal(sent.images.length, 0)
+    assert.equal(sent.texts.length, 1)
+    // 未订阅指定任务名 → 拒绝
+    assert.match(await call(tools.resendDailyReport, { name: '每日早报' }, ctx('u2')), /未订阅\/未创建任务/)
+    // 没配置 provider → 明确降级
+    const noProvider = taskTools({ taskStore: store, reportStore })
+    assert.match(await call(noProvider.resendDailyReport, {}, ctx('u1')), /发送能力未就绪/)
+    // 渠道缺 contextToken（如网页对话）→ 明确提示
+    const noToken = await call(tools.resendDailyReport, {}, { context: { userId: 'u1', channel: {} } })
+    assert.match(noToken, /当前渠道不支持发送图片/)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
   }

@@ -39,6 +39,11 @@ export class TaskStore {
     const cols = this.#db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name)
     if (!cols.includes('kind')) this.#db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'plain'")
     if (!cols.includes('cover')) this.#db.exec('ALTER TABLE tasks ADD COLUMN cover INTEGER NOT NULL DEFAULT 0')
+    // 迁移：失败重试状态（ADR-0026）。`last_run_at` 语义收窄为"最后一次**结算**
+    // 时间"（成功，或重试耗尽后放弃）；`attempt_count`/`last_attempt_at` 记录
+    // 本结算周期内已尝试次数与时间，供调度器节流重试、判断何时放弃。
+    if (!cols.includes('attempt_count')) this.#db.exec('ALTER TABLE tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0')
+    if (!cols.includes('last_attempt_at')) this.#db.exec('ALTER TABLE tasks ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0')
     // 用户主题订阅（ADR-0019）：per-user，按 user_id 隔离；只对已订阅任务生效。
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS report_topics (
@@ -238,8 +243,17 @@ export class TaskStore {
     try { this.#db.close() } catch { /* already closed */ }
   }
 
+  /** 结算本周期（成功，或重试耗尽放弃）：推进 `last_run_at`（下次调度的锚点）
+   * 并把 `attempt_count` 归零，为下一个周期做准备。 */
   markRun(id, atMs, error = '') {
-    this.#db.prepare('UPDATE tasks SET last_run_at = ?, last_error = ? WHERE id = ?').run(Math.floor(atMs), String(error || ''), id)
+    this.#db.prepare('UPDATE tasks SET last_run_at = ?, last_error = ?, attempt_count = 0 WHERE id = ?').run(Math.floor(atMs), String(error || ''), id)
+  }
+
+  /** 记一次失败尝试但**不**结算（ADR-0026）：`last_run_at` 保持不变，任务仍会
+   * 被判定为"到期"，调度器据此按 `retryIntervalMs` 节流重试，而不是静默
+   * 等到下一个自然周期（第二天）。 */
+  markAttemptFailed(id, atMs, error = '') {
+    this.#db.prepare('UPDATE tasks SET attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = ? WHERE id = ?').run(Math.floor(atMs), String(error || ''), id)
   }
 
   #query(sql, params = []) {
@@ -262,6 +276,8 @@ export class TaskStore {
       createdAt: Number(row.created_at),
       lastRunAt: Number(row.last_run_at),
       lastError: row.last_error || '',
+      attemptCount: Number(row.attempt_count || 0),
+      lastAttemptAt: Number(row.last_attempt_at || 0),
     }
   }
 }

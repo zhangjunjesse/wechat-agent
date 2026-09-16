@@ -94,6 +94,9 @@ const downloadTokens = new DownloadTokenStore({ ttlMs: Number(process.env.DOWNLO
 process.env.PUBLIC_BASE_PATH ||= '/wechat-agent/'
 const publicBaseUrl = (process.env.PUBLIC_BASE_URL || 'https://datadefender.cn').replace(/\/$/, '')
 const issueDownloadLink = (userId, relPath) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}files/${downloadTokens.issue(userId, relPath)}`
+// 提前到这里（原在 scheduler 构造前）：resend_daily_report 工具（ADR-0026）也要
+// 用它拼公网链接，而工具集在 buildTools() 里构建，早于 scheduler。
+const reportUrl = (reportId) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}reports/${reportId}`
 
 // 飞书文档（ADR-0021）：条件启用——未配置 LARK_APP_ID/SECRET 时 lark 为 null，
 // 整套工具不注册、/lark/* 路由 404，服务器行为与未加此功能完全一致（零影响）。
@@ -104,7 +107,7 @@ const lark = larkAppId && larkAppSecret
   : null
 if (!lark) console.warn('lark docs disabled: set LARK_APP_ID + LARK_APP_SECRET to enable (ADR-0021)')
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, lark })
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
@@ -139,12 +142,17 @@ if (subagentRunner) {
 // browser: system chromium/chrome/edge or @sparticuz/chromium) and pushed as
 // 图+短描述; the web URL goes in the short text. No browser → renderPoster
 // throws and the scheduler degrades to text-only (non-fatal).
-const reportUrl = (reportId) => `${publicBaseUrl}${process.env.PUBLIC_BASE_PATH}reports/${reportId}`
+// 失败重试（ADR-0026）：TASK_RETRY_MAX 次（默认 3），每次间隔 TASK_RETRY_INTERVAL_MS
+// （默认 20 分钟）；仍失败才放弃、等下一个自然周期（通常是明天）。
 const posterRender = async (report, html) => {
   const out = path.resolve('data/reports', `${report.id}.png`)
   return renderPoster(html, { width: 750, outPath: out })
 }
-const scheduler = agent ? new TaskScheduler({ taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender }) : null
+const scheduler = agent ? new TaskScheduler({
+  taskStore, agent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender,
+  retryMax: Number(process.env.TASK_RETRY_MAX || 3),
+  retryIntervalMs: Number(process.env.TASK_RETRY_INTERVAL_MS || 20 * 60_000),
+}) : null
 scheduler?.start()
 
 // 群命令监听（群聊入口：收走 wechat-sync，发走 iLink 私聊）。
