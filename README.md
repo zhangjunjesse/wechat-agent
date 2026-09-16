@@ -22,8 +22,11 @@ https://datadefender.cn/wechat-agent/
 
 ```env
 OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_MODEL=deepseek-chat
+# 任意 OpenAI 兼容端点均可（官方 DeepSeek API，或内部网关/代理）——只要模型本身
+# 讲 DeepSeek 的推理格式即可：deepseek-thinking-client.mjs 无条件给每次请求包一层
+# reasoning_content 回传（多轮工具调用必需，否则 400）。当前生产用内部网关：
+OPENAI_BASE_URL=http://120.78.77.32:4000/v1
+OPENAI_MODEL=deepseek-v4-flash
 AGENT_SDK=openai
 WECHAT_SYNC_BASE_URL=https://datadefender.cn
 WECHAT_SYNC_ACCESS_KEY=...

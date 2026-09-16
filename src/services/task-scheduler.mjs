@@ -149,7 +149,7 @@ export class TaskScheduler {
     const runUserId = `task-${task.id}${userId ? `-${userId}` : ''}` // 合成用户：ephemeral 执行
     try {
       // 近 7 天已报道标题注入 prompt 要求回避（去重窗口按用户维度隔离）
-      const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '' })
+      const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '', now })
       const reply = await this.#agent.respond({
         userId: runUserId,
         text: buildReportPrompt(task, recent, { topics }),
@@ -161,7 +161,7 @@ export class TaskScheduler {
       const parsed = parseReportJson(rawText)
       if (!parsed.ok) return { ok: false, error: 'report_unparsable', rawText }
       // 机械去重（指纹比对近 7 天；删后不足 3 条保底不删）
-      const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '' }))
+      const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '', now }))
       let report = this.#reportStore.saveReport({ taskId: task.id, name: task.name, runAt: now, focus: parsed.focus, rawText, items: deduped.items, userId: userId || '' })
       // 海报长图（ADR-0018）：HTML → PNG；失败非致命，降级为纯文本短描述
       if (this.#posterRender) {

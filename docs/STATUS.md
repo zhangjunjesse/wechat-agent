@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **329/329 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **330/330 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -280,8 +280,22 @@
 - **已部署**：2026-09-10 部署到 `datadefender.cn/wechat-agent`（tgz 打包 →
   `/opt/wechat-agent/app` 挂载运行，`docker run --env-file server.env`；重建容器
   必须 `docker rm + docker run`，`docker restart` 不会重读 env-file）。
-  模型 `deepseek-flash`（API 实测：可用模型仅 `deepseek-flash` / `deepseek-v4-pro`），
   `REDFOX_API_KEY` 已配置，gzh 搜索/抓正文线上实测连通。
+- **模型切换（2026-09-16）**：生产 `OPENAI_BASE_URL`/`OPENAI_MODEL` 从官方
+  DeepSeek API 切到内部网关 `http://120.78.77.32:4000/v1` + `deepseek-v4-flash`
+  （`server.env` 已更新，容器已 `docker rm + docker run` 重建生效，`healthz` 200）。
+  **真实验证**（不只是改配置）：`scripts/verify-deepseek-thinking.mjs` 改为读
+  `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`（原来硬编码官方端点+`DS_KEY`），
+  首轮 `tool_choice: 'required'` 强制触发 `assistant(tool_calls)→tool→assistant`
+  这条会 400 的路径，对新端点跑通：`reasoning_content` 正常返回（106/83 字符）、
+  多轮回传无 400。`README.md`/`deploy/server.env.example` 同步改了默认值与注释。
+  顺手修了一个**踩到时间边界的旧 bug**：`ReportStore.recentFingerprints`/
+  `recentTitles` 内部硬用真实 `Date.now()` 算 7 天窗口，而 `TaskScheduler` 自己的
+  `now()` 虽可注入却没往下传——`tests/task-scheduler.test.mjs` 的固定日期 fixture
+  （2026-09-10 附近）跑到真实日期满 7 天后（今天 2026-09-16）窗口对不上、假失败。
+  改法：两个方法加 `now`（默认 `Date.now()`，生产行为不变）选项，`task-scheduler.mjs`
+  把自己已有的 `now` 传下去；新增回归测试锁死"传 now 与不传 now 窗口基准不同"。
+  `node --test tests/*.test.mjs` → **330/330 全绿**。
 - **DeepSeek thinking 兼容**（关键）：deepseek-flash 默认思考模式，带 tools 的多轮
   请求必须回传 `reasoning_content`（否则 400）。`src/llm/deepseek-thinking-client.mjs`
   包装 OpenAI client 按 assistant 消息顺序缓存/回填；`agents-sdk-agent` 每次 run

@@ -91,9 +91,13 @@ export class ReportStore {
   }
 
   /** 近 `days` 天内该任务（某用户维度）已报道条目的标题指纹集合。
-   * userId 缺省 = 公共版；传了 = 该用户个性化版（ADR-0019，互不串）。 */
-  recentFingerprints(taskId, days = 7, { userId = '' } = {}) {
-    const since = Date.now() - days * 86_400_000
+   * userId 缺省 = 公共版；传了 = 该用户个性化版（ADR-0019，互不串）。
+   * `now` 可注入（默认真实 `Date.now()`，生产不变）：2026-09-16 发现调用方
+   * `TaskScheduler` 自己的 `#now()` 可注入却没传下来，测试固定日期跑够 7 天后
+   * 窗口对不上而假失败——这里补上，调用方（task-scheduler.mjs）需把同一个
+   * `now` 传进来，否则本参数形同虚设。 */
+  recentFingerprints(taskId, days = 7, { userId = '', now = Date.now() } = {}) {
+    const since = now - days * 86_400_000
     const rows = this.#db.prepare(`
       SELECT i.fingerprint FROM report_items i JOIN reports r ON r.id = i.report_id
       WHERE r.task_id = ? AND r.user_id = ? AND r.run_at >= ? AND i.fingerprint != ''
@@ -101,9 +105,10 @@ export class ReportStore {
     return new Set(rows.map((r) => r.fingerprint))
   }
 
-  /** 近 `days` 天内该任务（某用户维度）已报道条目的标题（新→旧，注入 prompt 用）。 */
-  recentTitles(taskId, days = 7, limit = 20, { userId = '' } = {}) {
-    const since = Date.now() - days * 86_400_000
+  /** 近 `days` 天内该任务（某用户维度）已报道条目的标题（新→旧，注入 prompt 用）。
+   * `now` 可注入，理由同 `recentFingerprints`。 */
+  recentTitles(taskId, days = 7, limit = 20, { userId = '', now = Date.now() } = {}) {
+    const since = now - days * 86_400_000
     const rows = this.#db.prepare(`
       SELECT i.title FROM report_items i JOIN reports r ON r.id = i.report_id
       WHERE r.task_id = ? AND r.user_id = ? AND r.run_at >= ?

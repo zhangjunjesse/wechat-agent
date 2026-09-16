@@ -102,6 +102,28 @@ test('recentFingerprints/recentTitles respect the 7-day window', () => {
   }
 })
 
+test('recentFingerprints/recentTitles accept an injectable `now` (fixes 2026-09-16 flake)', () => {
+  // 根因：task-scheduler.mjs 自己的 now() 可注入（测试用固定日期），但过去
+  // 没有把它传给 ReportStore，store 内部一直用真实 Date.now() 算 7 天窗口——
+  // 测试固定在 2026-09-10 附近的 fixture，跑到第 7 天真实日期就会窗口对不上、
+  // 假失败。这里验证：传 now 后，窗口以 now 为基准，与真实墙钟时间无关。
+  const { file, store } = setup()
+  try {
+    const fixedNow = Date.UTC(2026, 8, 10, 0, 0, 30) // 与真实今天（远早于/晚于）无关
+    store.saveReport({ taskId: 't1', name: 't', runAt: fixedNow - 86_400_000, items: [{ title: '固定昨日', summary: '', source: '', url: '' }] })
+    store.saveReport({ taskId: 't1', name: 't', runAt: fixedNow - 8 * 86_400_000, items: [{ title: '固定过期', summary: '', source: '', url: '' }] })
+    // 不传 now：按真实当前时间算窗口，两条记录相对"真实现在"都很旧 → 都不在 7 天内
+    assert.deepEqual(store.recentTitles('t1', 7, 20), [])
+    assert.equal(store.recentFingerprints('t1', 7).size, 0)
+    // 传 now=fixedNow：窗口以 fixedNow 为基准，昨日在窗口内、8 天前不在
+    assert.deepEqual(store.recentTitles('t1', 7, 20, { now: fixedNow }), ['固定昨日'])
+    assert.ok(store.recentFingerprints('t1', 7, { now: fixedNow }).has(fingerprintOf('固定昨日')))
+    assert.ok(!store.recentFingerprints('t1', 7, { now: fixedNow }).has(fingerprintOf('固定过期')))
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})
+
 test('user-scoped reports are isolated from the shared version (ADR-0019)', () => {
   const { file, store } = setup()
   try {
