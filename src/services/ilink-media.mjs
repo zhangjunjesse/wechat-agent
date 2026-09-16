@@ -4,7 +4,16 @@ import path from 'node:path'
 import { resolveUserPath } from './user-sandbox.mjs'
 
 const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
-const MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
+
+/** 入站附件的统一大小上限（ADR-0010）。ADR-0029 的历史聊天附件取回复用同一
+ * 条上限——两条路径最终落进同一个 inbox/ 目录，边界必须一致。 */
+export const MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
+
+/** 入站附件文件名清洗（ADR-0010）：剥目录、只保留安全字符（含中文/空格/括号）、
+ * 截断到 180 字符；清洗后为空时用 fallback。ADR-0029 复用同一套逻辑。 */
+export function sanitizeInboundName(name, fallback = `inbound-${Date.now()}.bin`) {
+  return path.basename(String(name || '')).replace(/[^\w.\-一-鿿 ()]/g, '_').slice(0, 180) || fallback
+}
 
 /** Download and decrypt an inbound iLink media item into the user's sandbox. */
 export async function downloadInboundFile({ fetchImpl = globalThis.fetch, item, userId, root, cdnBaseUrl = DEFAULT_CDN_BASE_URL, messageId = '' }) {
@@ -22,7 +31,7 @@ export async function downloadInboundFile({ fetchImpl = globalThis.fetch, item, 
   const plain = Buffer.concat([decipher.update(encrypted), decipher.final()])
   if (plain.length > MAX_INBOUND_FILE_BYTES) throw new Error('iLink inbound media exceeds 50MB limit')
   const originalName = item?.file_item?.file_name || `inbound-${messageId || Date.now()}.bin`
-  const safeName = path.basename(String(originalName)).replace(/[^\w.\-\u4e00-\u9fff ()]/g, '_').slice(0, 180) || `inbound-${Date.now()}.bin`
+  const safeName = sanitizeInboundName(originalName)
   const full = resolveUserPath(root, userId, `inbox/${Date.now()}-${safeName}`)
   await fs.mkdir(path.dirname(full), { recursive: true })
   await fs.writeFile(full, plain)

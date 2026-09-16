@@ -27,10 +27,10 @@ function makeDb(file) {
   return db
 }
 
-function insertMsg(db, { id, chat, display, isGroup, ts, senderWxid, senderDisplay, content, msgType = 1 }) {
+function insertMsg(db, { id, chat, display, isGroup, ts, senderWxid, senderDisplay, content, msgType = 1, attachment = null }) {
   db.prepare(`INSERT INTO messages (msg_id, account, chat_wxid, chat_display, is_group, ts, datetime, sender, sender_wxid, sender_display, msg_type, content, attachment, device, received_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, 'acc', chat, display, isGroup ? 1 : 0, ts, '', senderWxid, senderWxid, senderDisplay, msgType, content, null, 'dev', ts)
+    .run(id, 'acc', chat, display, isGroup ? 1 : 0, ts, '', senderWxid, senderWxid, senderDisplay, msgType, content, attachment, 'dev', ts)
 }
 
 function insertRoster(db, { chat, name, memberWxid, memberDisplay }) {
@@ -166,5 +166,56 @@ test('no identity (unverified) yields no accessible chats, not an error leak', (
     assert.deepEqual(store.accessibleChats({}), [])
     const r = store.searchMyMessages({}, {})
     assert.equal(r.error, 'no_identity')
+  })
+})
+
+// ---- ADR-0029: attachment 列的结构化解析 ----
+// 附件 JSON 样例照抄生产库真实抽样 + receiver.py 渲染段的权威字段名。
+
+function withAttachmentStore(fn) {
+  const file = path.join(os.tmpdir(), `wls-att-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const db = makeDb(file)
+  try {
+    // 王五的私聊线程（chat_wxid = 自己的 wxid），不影响上面 zhangsan/lisi 的会话断言
+    const base = { chat: 'wxid_wang', display: '王五', isGroup: false, senderWxid: 'wxid_wang', senderDisplay: '王五' }
+    insertMsg(db, { ...base, id: 'a1', ts: 2100, msgType: 3, content: '', attachment: JSON.stringify({ kind: 'image', available: true, media_id: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335, thumb: false }) })
+    insertMsg(db, { ...base, id: 'a2', ts: 2200, msgType: 49, content: '', attachment: JSON.stringify({ kind: 'file', available: false, filename: '周报.docx', reason: '设备离线' }) })
+    insertMsg(db, { ...base, id: 'a3', ts: 2300, msgType: 49, content: '', attachment: JSON.stringify({ kind: 'link', title: '一篇分享', url: 'https://example.com/a' }) })
+    insertMsg(db, { ...base, id: 'a4', ts: 2400, msgType: 49, content: '@助手 看一下', attachment: JSON.stringify({ kind: 'quote', reply: '@助手 看一下', quoted_name: '李四', quoted_text: '原始被引用文本' }) })
+    insertMsg(db, { ...base, id: 'a5', ts: 2500, msgType: 3, content: '', attachment: 'not-json{' })
+    insertMsg(db, { ...base, id: 'a6', ts: 2600, msgType: 1, content: '纯文本' })
+    db.close()
+    const store = new WechatLogStore({ file })
+    return fn(store)
+  } finally {
+    try { fs.rmSync(file, { force: true }) } catch (e) {}
+  }
+}
+
+const wangwu = { wxid: 'wxid_wang', nickname: '王五' }
+
+test('attachment JSON is parsed into whitelisted structured fields per kind (ADR-0029)', () => {
+  withAttachmentStore((store) => {
+    const r = store.searchChat({ chat: '助手' }, wangwu)
+    const [img, file, link, quote] = r.messages.slice(0, 4).map((m) => m.attachment)
+    assert.deepEqual(img, { kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335 })
+    assert.deepEqual(file, { kind: 'file', available: false, filename: '周报.docx', reason: '设备离线' })
+    assert.deepEqual(link, { kind: 'link', title: '一篇分享', url: 'https://example.com/a' })
+    assert.deepEqual(quote, { kind: 'quote', reply: '@助手 看一下', quotedName: '李四', quotedText: '原始被引用文本' })
+  })
+})
+
+test('available=false keeps the honest reason; unparsable attachment falls back to null + type label (ADR-0029)', () => {
+  withAttachmentStore((store) => {
+    const r = store.searchChat({ chat: '助手' }, wangwu)
+    const file = r.messages[1]
+    assert.equal(file.attachment.available, false)
+    assert.equal(file.attachment.reason, '设备离线')
+    const broken = r.messages[4] // a5: 非 JSON → attachment null，content 维持占位符
+    assert.equal(broken.attachment, null)
+    assert.equal(broken.content, '[图片]')
+    const text = r.messages[5] // a6: 文本消息行为不变
+    assert.equal(text.attachment, null)
+    assert.equal(text.content, '纯文本')
   })
 })

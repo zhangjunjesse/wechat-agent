@@ -93,3 +93,53 @@ test('image_generate surfaces pipeline failures instead of crashing', async () =
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ---- ADR-0030: image_describe（看图理解）----
+
+test('image_describe reads the sandbox image and returns the vision model text (ADR-0030)', async () => {
+  const root = makeEnv()
+  const seen = []
+  const vision = { describeImage: async ({ buffer, mimeType, question }) => { seen.push([buffer.toString(), mimeType, question]); return '一张测试图片，画面里有文字。' } }
+  try {
+    const { imageDescribe } = imageTools({ root, vision })
+    const out = await call(imageDescribe, { path: 'inbox/photo.png', question: '图里有什么' }, ilinkCtx)
+    assert.equal(out, '一张测试图片，画面里有文字。')
+    assert.deepEqual(seen, [['png-bytes', 'image/png', '图里有什么']])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('image_describe rejects non-image paths without ever calling the vision model (ADR-0030)', async () => {
+  const root = makeEnv()
+  fs.writeFileSync(path.join(root, 'u1', 'inbox', 'doc.pdf'), 'pdf-bytes')
+  let called = 0
+  const vision = { describeImage: async () => { called++; return 'x' } }
+  try {
+    const { imageDescribe } = imageTools({ root, vision })
+    const out = await call(imageDescribe, { path: 'inbox/doc.pdf' }, ilinkCtx)
+    assert.match(out, /不是图片文件，暂不支持/)
+    assert.equal(called, 0)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('image_describe surfaces gateway failures and missing files gracefully (ADR-0030)', async () => {
+  const root = makeEnv()
+  const vision = { describeImage: async () => { throw new Error('视觉模型请求超时（60 秒），请稍后再试') } }
+  try {
+    const { imageDescribe } = imageTools({ root, vision })
+    const out = await call(imageDescribe, { path: 'inbox/photo.png' }, ilinkCtx)
+    assert.match(out, /图片理解失败：视觉模型请求超时/)
+    const missing = await call(imageDescribe, { path: 'inbox/nope.png' }, ilinkCtx)
+    assert.match(missing, /找不到文件/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('image_describe does not exist at all when VISION_MODEL is not configured (ADR-0030)', () => {
+  const { imageDescribe } = imageTools({ root: 'unused' })
+  assert.equal(imageDescribe, null)
+})

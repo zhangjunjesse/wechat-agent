@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **345/345 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **364/364 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -337,6 +337,54 @@
 - 决策：`docs/ADR-0028-report-scheduler-reliability.md`。
 - 遗留：忙碌窗口只是被隔离没有被缩短（生成总量仍随订阅数线性涨）；投递失败
   仍不重试（维持 ADR-0026 区分）；队列隔离效果未经生产高峰实测。
+
+## 历史聊天附件安全取回（ADR-0029，2026-09-16）
+
+- 触发：用户反馈"agent 说看不到聊天记录里的文件，但公网浏览器能看图/能下载"——排查发现
+  数据从未缺失：`WechatLogStore` 检索 SQL 压根没 SELECT `attachment` 列，非文本消息一律
+  塌缩成写死占位符 `[图片]`；`GroupCommandWatcher` 只认 `kind==='quote'`，其余静默丢弃。
+- 新增 `parseAttachment()`（`wechat-log-store.mjs`，白名单解析 image/file/video/voice/
+  sticker/link/quote/merged 各自字段）+ 新工具 `wechat_fetch_chat_file`：**按"会话+消息
+  时间"定位、绝不接受裸 media_id**——重新过一遍 `searchChat` 的租户校验（`accessibleChats`），
+  只有 agent 自己真能看到的那条消息里解析出的 media_id 才会被用来找文件，防止全局命名空间
+  的 media_id 穿透"用户只能看自己所在会话"的边界。
+- 新服务 `wechat-media.mjs` 直读 `/wechat-sync-data/media/<media_id>.<ext>`（与
+  `sync_inbox.db` 同一早已挂载的只读目录，wechat-sync 仓库零改动、不新增挂载/接口/密钥），
+  落盘到与 ADR-0010 入站附件**同一个** `inbox/` 沙箱（`MAX_INBOUND_FILE_BYTES`/
+  `sanitizeInboundName` 从 `ilink-media.mjs` 提取为共享导出函数）。
+- 明确不选"直接转发 wechat-sync 的 `/wechat-media/<id>?k=<全局密钥>` 链接"——那把密钥能看
+  所有用户的所有聊天记录，转发等于把"看所有人聊天"的钥匙发给单个用户，与 ADR-0001/0005/
+  0007 的多租户边界冲突。
+- 验证：`node --test tests/*.test.mjs` → **364/364 全绿**（新增 9 条与本记录直接相关，含
+  一条**用真实 `WechatLogStore` 验证跨租户访问被拒绝**的用例，非 mock 假通过）；生产
+  `wechatMediaDir` 默认值（`WECHAT_LOG_DB` 同目录下的 `media/`）人工核对存在且有真实文件，
+  **不需要新增任何 env 变量**即可生效。
+- 决策：`docs/ADR-0029-historical-chat-attachments.md`。
+- 遗留：非图片文档（docx/pdf/视频/语音）能取回+转发但 agent 仍读不懂内容（图片这部分由
+  ADR-0030 补齐）；合并转发消息只有标题/预览；取回操作暂无节流。
+
+## 看图理解（ADR-0030，2026-09-16）
+
+- 问题：agent 对图片只有转发（`send_file`）和变换（`image_generate` edit/inpaint），完全
+  没有"看懂图里是什么"的能力——ADR-0010 时代就存在的缺口，这次因 ADR-0029 让"取历史图片"
+  变容易了才被真正摸到。
+- 新增独立 `VisionClient`（`src/services/vision-client.mjs`）：单轮、无工具、标准 OpenAI
+  vision content block，直连 `${OPENAI_BASE_URL}/chat/completions`，**刻意不接
+  `deepseek-thinking-client`/`AgentsSdkAgent` 主链路**（那条链路因 DeepSeek
+  `reasoning_content` 强制回传已出过三次生产 400；视觉是一次性单轮问答，生产网关人工
+  冒烟实测 `reasoning_tokens:0`，没理由沾那套复杂度）。60 秒超时、无重试、无 session。
+- 新工具 `image_describe`（`image-tools.mjs`）：读用户沙箱图片（不区分入站收到的还是历史
+  聊天取回的，同一个 `inbox/` 目录天然通用），先用 `classifyMediaType`（ADR-0012）拦非图片
+  路径。**条件注册**（同 lark/wechat_* 的 fail-closed 模式）：未配置 `VISION_MODEL` 时
+  `vision=null`，工具压根不出现在列表里，不是"存在但报错"。
+- 模型选型依据：部署前对生产真实网关+key、`model=gpt-5.6-terra` 做了一次人工冒烟（自动化
+  测试按项目纪律一律 mock fetch），真实图片（取自生产聊天记录）描述内容与上下文语义完全
+  对得上，`usage.reasoning_tokens:0` 印证了"不需要 DeepSeek thinking 链路"的判断。
+- 验证：`node --test tests/*.test.mjs` → **364/364 全绿**（新增 10 条与本记录直接相关，含
+  请求体形状/超时/网关错误透传/空内容拒绝/非图片路径零调用/未配置时工具不存在）。
+- 决策：`docs/ADR-0030-vision-image-understanding.md`。
+- 遗留：只做静态图片，视频抽帧/语音转写/文档解析明确不做；不会被自动调用，需 agent 自己
+  判断要不要看图；无结果缓存；生产 `VISION_MODEL` 启用与本次代码部署是否同批，见下方记录。
 
 ## 会话时间感知（ADR-0015）
 

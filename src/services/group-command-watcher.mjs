@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createProgressNotifier } from './progress-notifier.mjs'
+import { parseAttachment } from './wechat-log-store.mjs'
+import { beijingDateTimeStr } from './time.mjs'
 
 /** 群命令监听器（群聊入口：收走 wechat-sync，发走 iLink 私聊）。
  *
@@ -121,19 +123,31 @@ export class GroupCommandWatcher {
     const cached = this.#contextTokens.get(ilinkId)
     if (!cached?.contextToken) return
 
-    // 3) 引用解析（attachment.kind=quote → quoted_text）
+    // 3) 附件解析：quote（ADR-0022，行为保持不变）→ 提取被引用原文；
+    //    image/file/video/voice/sticker/link（ADR-0029）→ 只在提示里如实描述，
+    //    要不要取文件由 agent 自己决定（wechat_fetch_chat_file 会重新过租户校验）
+    const attach = parseAttachment(row.attachment)
     let quoted = ''
-    try {
-      const a = JSON.parse(String(row.attachment || ''))
-      if (a?.kind === 'quote') quoted = String(a.quoted_text || '')
-    } catch { /* 非 JSON 引用 */ }
+    let attachmentNote = ''
+    if (attach?.kind === 'quote') {
+      quoted = String(attach.quotedText || '')
+    } else if (attach && ['image', 'file', 'video', 'voice', 'sticker'].includes(attach.kind)) {
+      const label = { image: '图片', file: '文件', video: '视频', voice: '语音', sticker: '表情' }[attach.kind]
+      const chatLabel = row.chat_display || row.chat_wxid
+      attachmentNote = attach.available === false
+        ? `📎 这条消息带了一个${label}附件${attach.filename ? `「${attach.filename}」` : ''}，但还没同步完成，暂时取不到${attach.reason ? `（${attach.reason}）` : ''}。`
+        : `📎 这条消息带了一个${label}附件${attach.filename ? `「${attach.filename}」` : ''}，如需查看/处理可用 wechat_fetch_chat_file 取回（chat=「${chatLabel}」，time=${beijingDateTimeStr(Number(row.ts) * 1000)}）。`
+    } else if (attach?.kind === 'link') {
+      attachmentNote = `🔗 这条消息带了一个分享链接：${[attach.title, attach.url].filter(Boolean).join(' ')}`
+    }
     const instruction = String(row.content || '').replace(/@助手/g, '').replace(/\u2005/g, '').trim()
     const chatName = row.chat_display || row.chat_wxid
 
-    // 4) 构造入站提示（场景 + 引用 + 指令 + 出处 + 能力提示）
+    // 4) 构造入站提示（场景 + 引用/附件 + 指令 + 出处 + 能力提示）
     const text = [
       `【微信群消息】用户 ${sender} 在群「${chatName}」里 @ 了你${quoted ? '，引用了一条消息' : ''}，请处理：`,
       quoted ? `📌 引用的消息内容：\n${quoted}` : '',
+      attachmentNote,
       instruction ? `🗣 用户的指令：${instruction}` : '',
       `📍 发送时间：${new Date(Number(row.ts) * 1000).toISOString()}`,
       '处理完成后请把结果私聊推送给用户。',

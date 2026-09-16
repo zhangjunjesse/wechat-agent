@@ -28,6 +28,7 @@ import { LarkClient } from './services/lark-client.mjs'
 import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
 import { TaskRunStore } from './services/task-run-store.mjs'
 import { SubagentRunner } from './services/subagent-runner.mjs'
+import { VisionClient } from './services/vision-client.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -83,6 +84,9 @@ memoryMaintenance?.start()
 const wechatLogDbFile = process.env.WECHAT_LOG_DB || ''
 const wechatLogStore = wechatLogDbFile && fs.existsSync(wechatLogDbFile) ? new WechatLogStore({ file: wechatLogDbFile }) : null
 if (wechatLogDbFile && !wechatLogStore) console.warn(`WECHAT_LOG_DB=${wechatLogDbFile} not found; wechat_* tools disabled`)
+// 历史聊天附件（ADR-0029）：媒体真身与 sync_inbox.db 同一只读挂载
+// （<db 目录>/media/<media_id>.<ext>），wechat_fetch_chat_file 直接只读拷贝。
+const wechatMediaDir = process.env.WECHAT_MEDIA_DIR || (wechatLogDbFile ? path.join(path.dirname(wechatLogDbFile), 'media') : '')
 
 // Download links (see ADR-0008): write_file / run_code write into a per-user
 // sandbox with no browse UI — the universal fallback (works from web chat,
@@ -107,7 +111,17 @@ const lark = larkAppId && larkAppSecret
   : null
 if (!lark) console.warn('lark docs disabled: set LARK_APP_ID + LARK_APP_SECRET to enable (ADR-0021)')
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark })
+// 视觉理解（ADR-0030）：条件启用——未配置 VISION_MODEL 时 vision 为 null，
+// image_describe 不注册，行为与未加此功能完全一致（模式同 lark/wechat_*）。
+// 复用同一网关的 OPENAI_BASE_URL/OPENAI_API_KEY；单轮一次性 HTTP 问答，
+// 刻意不接 deepseek-thinking-client/agents-sdk-agent 主链路（历史 400 事故区）。
+const visionModel = process.env.VISION_MODEL || ''
+const vision = visionModel && process.env.OPENAI_API_KEY
+  ? new VisionClient({ baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, model: visionModel })
+  : null
+if (!vision) console.warn('vision disabled: set VISION_MODEL to enable image_describe (ADR-0030)')
+
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark, vision })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
 const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
@@ -116,7 +130,7 @@ const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.e
 // 主 agent 只决策与秒回；长任务交给后台子 agent（独立实例 + 独立 thinking 缓存，
 // 受限工具集：无 delegate/task 工具防递归，保留 send_file/notify_user 与业务工具）。
 const taskRunStore = new TaskRunStore({ file: process.env.TASK_RUNS_FILE || 'data/task-runs.db' })
-const subagentTools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, root: userFilesRoot, issueDownloadLink, provider, taskStore: null, reportStore: null, lark })
+const subagentTools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore: null, reportStore: null, lark, vision })
 const makeSubagent = () => process.env.OPENAI_API_KEY
   ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools: subagentTools, skillRegistry })
   : null

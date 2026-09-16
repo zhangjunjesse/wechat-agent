@@ -3,14 +3,19 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { resolveUserPath } from '../services/user-sandbox.mjs'
 import { getImageApiKey, uploadImage, createImageTask, waitForImageTask, downloadImage, extFromUrl, IMAGE_SIZES, IMAGE_RESOLUTIONS } from '../services/image-api.mjs'
+import { classifyMediaType } from '../services/media-type.mjs'
+import { mimeForImage } from '../services/vision-client.mjs'
 
 /** 图片生成/编辑/重绘工具（图像工坊技能）。三种模式：
  *   generate — 文生图 / 图生图（参考图仅作风格参考，重新生成版式）
  *   edit     — 图像编辑（保留原图主体结构，按 prompt 改元素）
  *   inpaint  — 局部重绘（只改 mask 透明区域，其余原样）
  * 参考图/mask 从用户沙箱读取；结果图片写入用户沙箱 images/ 目录并返回相对路径，
- * 模型随后应调用 send_file（微信）或给出下载链接交付。 */
-export function imageTools({ root = process.env.USER_FILES_ROOT || 'data/user-files', getKey = getImageApiKey, api = { uploadImage, createImageTask, waitForImageTask, downloadImage } } = {}) {
+ * 模型随后应调用 send_file（微信）或给出下载链接交付。
+ *
+ * `vision`（可选，VisionClient 实例，ADR-0030）：传了才构建 image_describe
+ * （看图理解）；未配置 VISION_MODEL 时为 null，工具压根不存在。 */
+export function imageTools({ root = process.env.USER_FILES_ROOT || 'data/user-files', getKey = getImageApiKey, api = { uploadImage, createImageTask, waitForImageTask, downloadImage }, vision = null } = {}) {
   const imageGenerate = tool({
     name: 'image_generate',
     description:
@@ -82,5 +87,41 @@ export function imageTools({ root = process.env.USER_FILES_ROOT || 'data/user-fi
       }
     },
   })
-  return { imageGenerate }
+  /** 看图理解（ADR-0030）：读用户沙箱里的静态图片 → VisionClient 一次性问答。
+   * 与 image_generate 相反方向（那边是生成图片，这边是理解图片）；不管图片是
+   * ADR-0010 入站收到的还是 ADR-0029 从历史聊天取回的，都在同一个 inbox/
+   * 目录，天然通用。仅静态图片：视频抽帧/语音转写明确不做（见 ADR-0030）。 */
+  const imageDescribe = vision ? tool({
+    name: 'image_describe',
+    description:
+      '看图：调用视觉模型理解一张图片的内容，返回文字描述。' +
+      'path 填我文件目录里图片的相对路径（如聊天附件取回的 inbox/xxx.png、image_generate 生成的 images/xxx.png）；' +
+      'question 可选（如"图里写了什么字"、"这是什么产品"），不填则做通用描述。' +
+      '只支持静态图片（jpg/png/gif/webp 等）；不支持视频抽帧、不支持语音转写、不能解析 docx/pdf 等文档。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '图片文件路径（相对我的文件目录）' },
+        question: { type: 'string', description: '可选，想了解图片的什么内容；不填做通用描述' },
+      },
+      required: ['path'],
+    },
+    execute: async (input, ctx) => {
+      const userId = ctx?.context?.userId
+      // 先按扩展名拦非图片（复用 ADR-0012 的分类白名单）：不把任意字节喂给视觉模型
+      if (classifyMediaType(input.path) !== 'image') {
+        return `「${input.path}」不是图片文件，暂不支持（只支持 jpg/png/gif/webp 等静态图片）。`
+      }
+      try {
+        const full = resolveUserPath(root, userId, input.path)
+        const buf = await fs.readFile(full)
+        return await vision.describeImage({ buffer: buf, mimeType: mimeForImage(input.path), question: input.question })
+      } catch (e) {
+        if (e?.code === 'ENOENT') return `找不到文件「${input.path}」，请先用 list_files 确认路径。`
+        return `图片理解失败：${e.message}`
+      }
+    },
+  }) : null
+
+  return { imageGenerate, imageDescribe }
 }

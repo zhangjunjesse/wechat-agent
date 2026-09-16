@@ -29,11 +29,19 @@ import { taskTools } from './task-tools.mjs'
  * (ADR-0009) so it can push a real WeChat file attachment when the current
  * turn's run-context `channel` says we're on a WeChat conversation.
  *
+ * `wechatMediaDir` (optional) is the wechat-sync media directory (same mount
+ * as the sync DB) for wechat_fetch_chat_file (ADR-0029); when absent the tool
+ * still registers but honestly reports it can't fetch file bytes.
+ *
+ * `vision` (optional) is a VisionClient instance (ADR-0030): only when
+ * VISION_MODEL is configured does image_describe get registered — same
+ * "config missing → feature silently absent" pattern as lark/wechat_*.
+ *
  * `use_skill` is NOT assembled here: it carries the per-user skill catalog in
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, wechatMediaDir, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark, vision = null }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -42,7 +50,7 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   const send = wechatSendTools({ provider, root })
   const binary = binaryFileTools({ root, issueDownloadLink })
   const gzh = gzhTools()
-  const image = imageTools({ root })
+  const image = imageTools({ root, vision })
   const poster = posterTools({ root })
   const tools = [
     files.readFile, files.writeFile, files.listFiles,
@@ -57,6 +65,8 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     image.imageGenerate,
     poster.renderPoster,
   ]
+  // 视觉理解（ADR-0030）：VISION_MODEL 未配置时 vision 为 null，工具压根不存在
+  if (image.imageDescribe) tools.push(image.imageDescribe)
   if (process.env.ADMIN_SKILLS === '1') {
     const manage = manageSkillTools({ skillRegistry })
     tools.push(manage.manageSkill)
@@ -70,8 +80,8 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
     if (reportStore) tools.push(tasks.getDailyReport, tasks.resendDailyReport)
   }
   if (wechatLogStore) {
-    const wechat = wechatTools({ wechatLogStore })
-    tools.push(wechat.wechatListChats, wechat.wechatSearchChat, wechat.wechatSearchMentions, wechat.wechatSearchMyMessages)
+    const wechat = wechatTools({ wechatLogStore, root, mediaDir: wechatMediaDir })
+    tools.push(wechat.wechatListChats, wechat.wechatSearchChat, wechat.wechatSearchMentions, wechat.wechatSearchMyMessages, wechat.wechatFetchChatFile)
   }
   if (lark?.client) {
     // 飞书文档（ADR-0021）：仅在配置 LARK_APP_ID/SECRET 时注册；redirectUri 供 OAuth 回调

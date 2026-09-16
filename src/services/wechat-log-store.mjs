@@ -129,7 +129,7 @@ export class WechatLogStore {
       clauses.push(`(${sub.join(' OR ')})`)
     }
     const cappedLimit = Math.max(1, Math.min(Number(limit) || DEFAULT_LIMIT, MAX_LIMIT))
-    const sql = `SELECT chat_wxid, chat_display, ts, sender_wxid, sender_display, msg_type, content
+    const sql = `SELECT chat_wxid, chat_display, ts, sender_wxid, sender_display, msg_type, content, attachment
                  FROM messages WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT ?`
     params.push(cappedLimit + 1)
     const rows = this.#db.prepare(sql).all(...params)
@@ -143,9 +143,38 @@ export class WechatLogStore {
         tsMs: Number(r.ts) * 1000,
         sender: r.sender_display || r.sender_wxid || '',
         content: r.msg_type === 1 ? String(r.content || '') : (MSG_TYPE_LABELS[r.msg_type] || `[不支持的消息类型:${r.msg_type}]`),
+        attachment: parseAttachment(r.attachment),
       })),
     }
   }
+}
+
+/** `messages.attachment` 是同步端写入的 JSON 文本，按 kind 归一化成结构化对象
+ * （ADR-0029）。字段名的权威来源是 wechat-chatlog-dsh receiver.py 的消息渲染段：
+ *   image/file/video/voice/sticker → media_id/ext/size/filename/available/reason
+ *   （sticker 有的只有 url 没有 media_id）；link → title/url；
+ *   quote → reply/quoted_name/quoted_text；merged → title/preview。
+ * 白名单透传：未知字段丢弃、非 JSON/缺 kind 一律返回 null（调用方回退到
+ * MSG_TYPE_LABELS 占位符），不把原始 JSON 泄给模型层。 */
+export function parseAttachment(raw) {
+  if (!raw) return null
+  let a
+  try { a = JSON.parse(String(raw)) } catch { return null }
+  if (!a || typeof a !== 'object' || typeof a.kind !== 'string') return null
+  const out = { kind: a.kind }
+  if (a.media_id != null) out.mediaId = String(a.media_id)
+  if (a.available != null) out.available = Boolean(a.available)
+  if (a.ext != null) out.ext = String(a.ext)
+  if (a.size != null) out.size = Number(a.size)
+  if (a.filename != null) out.filename = String(a.filename)
+  if (a.url != null) out.url = String(a.url)
+  if (a.title != null) out.title = String(a.title)
+  if (a.reason != null) out.reason = String(a.reason)
+  if (a.reply != null) out.reply = String(a.reply)
+  if (a.quoted_name != null) out.quotedName = String(a.quoted_name)
+  if (a.quoted_text != null) out.quotedText = String(a.quoted_text)
+  if (a.preview != null) out.preview = String(a.preview)
+  return out
 }
 
 /** Escape SQLite LIKE metacharacters (`\`, `%`, `_`) in user-supplied text so

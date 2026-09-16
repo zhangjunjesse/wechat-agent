@@ -133,6 +133,45 @@ test('watcher picks the matching profile that has a push channel, skipping token
   }
 })
 
+test('watcher surfaces media attachments in the prompt with a fetch hint, without touching quote behavior (ADR-0029)', async () => {
+  const IMG_ATTACHMENT = JSON.stringify({ kind: 'image', available: true, media_id: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335 })
+  const { cursorFile, watcher, calls } = setup({
+    rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 1789471204, sender_display: 'Z.俊', content: '@助手 这张图看一下', attachment: IMG_ATTACHMENT }],
+  })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 1)
+    const text = calls[0].text
+    assert.match(text, /图片附件/)
+    assert.match(text, /wechat_fetch_chat_file/)
+    assert.match(text, /chat=「测试群」/)
+    assert.match(text, /time=\d{4}-\d{2}-\d{2} \d{2}:\d{2}/) // 北京时间戳，可直接照抄给取回工具
+    assert.doesNotMatch(text, /📌 引用的消息内容/) // 非 quote：不触发引用段
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
+test('watcher reports unsynced attachments honestly and passes link shares through (ADR-0029)', async () => {
+  const FILE_UNSYNCED = JSON.stringify({ kind: 'file', available: false, filename: '周报.docx', reason: '设备离线' })
+  const LINK_ATTACHMENT = JSON.stringify({ kind: 'link', title: '一篇分享', url: 'https://example.com/a' })
+  const { cursorFile, watcher, calls } = setup({
+    rows: [
+      { msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 100, sender_display: 'Z.俊', content: '@助手 发我一下', attachment: FILE_UNSYNCED },
+      { msg_id: 'm2', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 200, sender_display: 'Z.俊', content: '@助手 读一下这篇', attachment: LINK_ATTACHMENT },
+    ],
+  })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 2)
+    assert.match(calls[0].text, /「周报\.docx」/)
+    assert.match(calls[0].text, /还没同步完成，暂时取不到（设备离线）/)
+    assert.match(calls[1].text, /分享链接：一篇分享 https:\/\/example\.com\/a/)
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
 test('cursor persists so restarts do not reprocess', async () => {
   const { dbFile, cursorFile, watcher, calls } = setup({
     rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', ts: 500, sender_display: 'Z.俊', content: '@助手 你好', attachment: QUOTE_ATTACHMENT }],
