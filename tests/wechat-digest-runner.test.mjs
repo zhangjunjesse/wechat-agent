@@ -239,6 +239,54 @@ test('a reduce that legitimately returns three empty sections is also "empty", n
   assert.equal(r.empty, true)
 })
 
+test('ADR-0032: an identity with no wxid whose nickname is ambiguous (chat_roster has >1 distinct member_wxid for it) gets a normal empty result, not an error, and burns zero LLM calls', async (t) => {
+  // 生产实测：已核验用户的 wxid 常年是空字符串，且真的有 4 个不同用户共享同一个
+  // 昵称"Z.俊"。在这条降级路径上，WechatLogStore.accessibleChats 现在会拒绝
+  // 返回（宁可这个用户看不到群，也不能把另一个同名人的群塞给他，见 ADR-0032）。
+  // digest 管道消费的是 accessibleChats 的返回值，天然继承这个"拒绝"——这里钉死
+  // 它落地为管道已有的"没有可读的群" empty 路径，而不是一个新的错误分支：
+  // 对订阅者来说，"我的群昵称撞车了" 和 "我确实不在任何群里" 都应该是同一种
+  // 静默、不打扰的结果，不该让用户看到一条自己无法理解/无法处理的错误。
+  // 真正的可观测性在 WechatLogStore 层（onAmbiguousNickname 回调 + 默认
+  // console.error），不需要在 digest 管道再重复一份。
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const chatFile = path.join(os.tmpdir(), `dg-amb-${stamp}.db`)
+  const gpFile = path.join(os.tmpdir(), `dg-amb-gp-${stamp}.db`)
+  const rpFile = path.join(os.tmpdir(), `dg-amb-rp-${stamp}.db`)
+  const db = new DatabaseSync(chatFile)
+  db.exec(`
+    CREATE TABLE messages (
+      msg_id TEXT PRIMARY KEY, account TEXT, chat_wxid TEXT, chat_display TEXT,
+      is_group INTEGER, ts INTEGER, datetime TEXT, sender TEXT, sender_wxid TEXT,
+      sender_display TEXT, msg_type INTEGER, content TEXT, attachment TEXT,
+      device TEXT, received_at INTEGER
+    );
+    CREATE TABLE chat_roster (
+      chat_wxid TEXT NOT NULL, chat_name TEXT, member_wxid TEXT NOT NULL,
+      member_display TEXT, synced_at INTEGER NOT NULL,
+      PRIMARY KEY (chat_wxid, member_wxid)
+    );
+  `)
+  // 两个不同的真实人，昵称都是"Z.俊"，分别在不同的群里。
+  db.prepare('INSERT INTO chat_roster (chat_wxid, chat_name, member_wxid, member_display, synced_at) VALUES (?,?,?,?,?)').run('g1@chatroom', '项目群', 'zj391504704', 'Z.俊', 1)
+  db.prepare('INSERT INTO chat_roster (chat_wxid, chat_name, member_wxid, member_display, synced_at) VALUES (?,?,?,?,?)').run('g9@chatroom', '别人的群', 'wxid_impostor', 'Z.俊', 1)
+  db.close()
+
+  const wechatLogStore = new WechatLogStore({ file: chatFile })
+  const groupProfiles = new GroupProfileStore({ file: gpFile })
+  const reportStore = new ReportStore({ file: rpFile })
+  const agent = makeAgent()
+  const runner = new WechatDigestRunner({ agent, wechatLogStore, groupProfiles, reportStore })
+  t.after(() => {
+    wechatLogStore.close(); groupProfiles.close(); reportStore.close()
+    for (const f of [chatFile, gpFile, rpFile]) fs.rmSync(f, { force: true })
+  })
+
+  const r = await runner.generate({ task: TASK, userId: 'u-tongming', profile: { nickname: 'Z.俊', wxid: '' }, now: NOW })
+  assert.deepEqual({ ok: r.ok, empty: r.empty, report: r.report }, { ok: true, empty: true, report: null })
+  assert.equal(agent.calls.length, 0) // 权限边界在第一步就拒绝了，没有任何 LLM 调用
+})
+
 test('an unparsable reduce is a real failure (retryable); a failing single group is not', async (t) => {
   const bad = setup({ agentOpts: { reduce: '模型今天罢工了' } })
   t.after(bad.cleanup)

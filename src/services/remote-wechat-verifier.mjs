@@ -11,15 +11,22 @@ export class RemoteWechatVerifier {
     const chat = (chats.chats || []).find((x) => x.chat_display === '助手' || x.chat_display?.includes('助手') || x.chat_wxid === '助手' || x.chat_wxid === 'filehelper')
     if (!chat) return { ...task, status: 'assistant_not_found' }
     const messages = await this.#get(`/wechat-api/messages?chat=${encodeURIComponent(chat.chat_wxid)}&limit=500`)
+    // Note: no `chatWxid` passed here — `chat` is whichever chat is literally
+    // named/remarked "助手" (or the filehelper self-chat), not the verifying
+    // user's own 1:1 thread, so its chat_wxid is not a valid wxid fallback
+    // (ADR-0032). It's shared context across every verification, not per-user.
     let match = findAssistantCode(messages.messages || [], task.code, { now: this.#now })
     // The sync connector may temporarily expose the contact under a different
     // display name. If the named chat has no match, search recent chats for the
-    // one-time code; the code itself remains the binding proof.
+    // one-time code; the code itself remains the binding proof. Each candidate
+    // here genuinely IS the specific chat the code was found in, so its
+    // chat_wxid is a legitimate wxid fallback when the message row itself
+    // doesn't carry sender_wxid (ADR-0032).
     if (!match) {
       for (const candidate of chats.chats || []) {
         if (candidate.chat_wxid === chat.chat_wxid) continue
         const candidateMessages = await this.#get(`/wechat-api/messages?chat=${encodeURIComponent(candidate.chat_wxid)}&limit=200`)
-        match = findAssistantCode(candidateMessages.messages || [], task.code, { now: this.#now })
+        match = findAssistantCode(candidateMessages.messages || [], task.code, { now: this.#now, chatWxid: candidate.chat_wxid })
         if (match) break
       }
     }

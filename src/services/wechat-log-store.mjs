@@ -5,16 +5,27 @@ import { DatabaseSync } from 'node:sqlite'
  * hop: wechat-agent's container mounts the same file read-only and queries it
  * directly with indexed SQL (see ADR-0007).
  *
- * Access control (per ADR-0007): a user may only see chats their WeChat
- * identity actually belongs to.
+ * Access control (per ADR-0007, tightened by ADR-0032): a user may only see
+ * chats their WeChat identity actually belongs to.
  *   - group chats: `chat_roster` has a row for this chat_wxid with their
- *     wxid or display name as a member (pushed from real WeChat group
- *     rosters, not inferred from message content).
+ *     wxid (or, only when wxid is unknown, their display name) as a member
+ *     (pushed from real WeChat group rosters, not inferred from message
+ *     content).
  *   - their own 1:1 thread: from the synced account's perspective, "my 1:1
  *     chat with user X" is a `messages` row with `chat_wxid === X's own wxid`
  *     — so a user's own wxid IS their direct-chat identifier. This is also
  *     literally their conversation with 助手 (the synced account), since
  *     that's the account whose data is being read.
+ *
+ * Matching is **tiered, not OR'd** (ADR-0032): when `identity.wxid` is known,
+ * nickname plays no part at all — a wxid match is the only source of truth.
+ * Nickname-only matching is a *downgrade path* for identities whose wxid we
+ * failed to capture at verification time, and nicknames are not unique (real
+ * production data has 4 different verified users sharing the nickname
+ * "Z.俊"). So the downgrade path refuses to guess: if the nickname resolves
+ * to more than one distinct `member_wxid` in `chat_roster`, that's an
+ * unresolvable same-name collision and this returns nothing rather than the
+ * union of both people's chats — see `#onAmbiguousNickname`.
  *
  * `ts` in the underlying schema is unix SECONDS; this module's public API
  * works in epoch ms (JS convention) and converts at the boundary.
@@ -28,29 +39,57 @@ const MSG_TYPE_LABELS = { 3: '[图片]', 34: '[语音]', 43: '[视频]', 49: '[�
 
 export class WechatLogStore {
   #db
+  #onAmbiguousNickname
 
-  constructor({ file }) {
+  /** `onAmbiguousNickname({ nickname, memberWxids })` fires whenever the
+   * nickname-downgrade path (see class doc, ADR-0032) hits a same-name
+   * collision and refuses to resolve chats. Return value is empty either
+   * way (fail closed) — this callback exists purely so the refusal is
+   * *observable* (ops can see "user X is stuck on the ambiguous downgrade
+   * path" instead of a silent, unexplained empty chat list). Defaults to
+   * `console.error` so production containers surface it in logs even
+   * without explicit wiring; tests override it to assert on the reason. */
+  constructor({ file, onAmbiguousNickname = defaultAmbiguousNicknameHandler } = {}) {
     if (!file) throw new TypeError('file is required')
     this.#db = new DatabaseSync(file, { readOnly: true })
+    this.#onAmbiguousNickname = onAmbiguousNickname
   }
 
   /** Chats `identity` ({ wxid, nickname }) may access: their group memberships
    * (from chat_roster) plus their own direct 1:1 thread. Order: groups first
-   * (by name), then the direct thread. */
+   * (by name), then the direct thread.
+   *
+   * Matching is tiered (ADR-0032): wxid, when present, is the *only* signal
+   * used for group membership — nickname is not consulted at all, so a
+   * same-named different person can never widen this user's group list.
+   * Nickname is used only as a downgrade when wxid is empty, and even then
+   * refuses to resolve (returns no groups) if that nickname is ambiguous in
+   * `chat_roster` (maps to more than one distinct real member_wxid). */
   accessibleChats(identity) {
     const wxid = String(identity?.wxid || '').trim()
     const nickname = String(identity?.nickname || '').trim()
     const out = new Map()
-    if (wxid || nickname) {
+    if (wxid) {
       const rows = this.#db.prepare(
         `SELECT chat_wxid, MAX(chat_name) AS chat_name FROM chat_roster
-         WHERE (? != '' AND member_wxid = ?) OR (? != '' AND member_display = ?)
-         GROUP BY chat_wxid ORDER BY chat_name`
-      ).all(wxid, wxid, nickname, nickname)
+         WHERE member_wxid = ? GROUP BY chat_wxid ORDER BY chat_name`
+      ).all(wxid)
       for (const r of rows) out.set(r.chat_wxid, { chatWxid: r.chat_wxid, name: r.chat_name || r.chat_wxid, isGroup: true })
-    }
-    if (wxid) {
       out.set(wxid, { chatWxid: wxid, name: ASSISTANT_CHAT_LABEL, isGroup: false })
+    } else if (nickname) {
+      const owners = this.#db.prepare(
+        `SELECT DISTINCT member_wxid FROM chat_roster WHERE member_display = ?`
+      ).all(nickname)
+      const distinctWxids = [...new Set(owners.map((o) => String(o.member_wxid || '')).filter(Boolean))]
+      if (distinctWxids.length > 1) {
+        this.#onAmbiguousNickname?.({ nickname, memberWxids: distinctWxids })
+        return []
+      }
+      const rows = this.#db.prepare(
+        `SELECT chat_wxid, MAX(chat_name) AS chat_name FROM chat_roster
+         WHERE member_display = ? GROUP BY chat_wxid ORDER BY chat_name`
+      ).all(nickname)
+      for (const r of rows) out.set(r.chat_wxid, { chatWxid: r.chat_wxid, name: r.chat_name || r.chat_wxid, isGroup: true })
     }
     return [...out.values()]
   }
@@ -156,6 +195,13 @@ export class WechatLogStore {
   close() {
     try { this.#db.close() } catch { /* already closed */ }
   }
+}
+
+/** ADR-0032 的默认「同名歧义」告警：`console.error` 而不是静默吞掉，即便调用方
+ * 没有显式传 `onAmbiguousNickname` 也能在容器日志里看到"某用户被挡在降级路径
+ * 上"，而不是查无实据的"怎么突然看不到群了"。 */
+function defaultAmbiguousNicknameHandler({ nickname, memberWxids }) {
+  console.error(`[wechat-log-store] accessibleChats: nickname "${nickname}" is ambiguous (${memberWxids.length} distinct member_wxid: ${memberWxids.join(', ')}) — refusing to resolve chats, no wxid on this identity to disambiguate (ADR-0032)`)
 }
 
 /** `messages.attachment` 是同步端写入的 JSON 文本，按 kind 归一化成结构化对象

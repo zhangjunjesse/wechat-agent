@@ -169,6 +169,93 @@ test('no identity (unverified) yields no accessible chats, not an error leak', (
   })
 })
 
+// ---- ADR-0032: tiered wxid/nickname matching, not OR'd ----
+// Production has 4 different verified users sharing the nickname "Z.俊" with
+// empty wxid, which under the old OR-matching let same-named people see each
+// other's entire group list. These tests pin the fix: wxid (when known) is
+// the *only* signal — a same-named different person can never widen the
+// result — and the nickname-only downgrade path refuses to guess when the
+// nickname maps to more than one distinct real member_wxid.
+
+function withSameNameStore(fn) {
+  const file = path.join(os.tmpdir(), `wls-sn-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const db = makeDb(file)
+  try {
+    // Real 张三 (wxid_zhang) is only in 项目群.
+    insertRoster(db, { chat: 'g1@chatroom', name: '项目群', memberWxid: 'wxid_zhang', memberDisplay: '张三' })
+    // A DIFFERENT person, also displayed "张三" (e.g. no custom WeChat ID set,
+    // or coincidental name), is in a completely unrelated group.
+    insertRoster(db, { chat: 'g9@chatroom', name: '重名的别人的群', memberWxid: 'wxid_zhang_impostor', memberDisplay: '张三' })
+    // A nickname that resolves to exactly one real member_wxid — the
+    // legitimate downgrade case (wxid unknown, but name is unique).
+    insertRoster(db, { chat: 'g8@chatroom', name: '摄影群', memberWxid: 'wxid_wang', memberDisplay: '老王' })
+    db.close()
+    const store = new WechatLogStore({ file })
+    return fn(store)
+  } finally {
+    try { fs.rmSync(file, { force: true }) } catch (e) {}
+  }
+}
+
+test('ADR-0032: wxid is the only signal when known — a same-named different person never widens the result', () => {
+  withSameNameStore((store) => {
+    const chats = store.accessibleChats({ wxid: 'wxid_zhang', nickname: '张三' }).map((c) => c.name).sort()
+    // Only the group the real wxid_zhang is actually in, plus their own
+    // direct thread — NOT "重名的别人的群", even though the nickname matches.
+    assert.deepEqual(chats, ['与助手的对话（私聊）', '项目群'])
+  })
+})
+
+test('ADR-0032: nickname-only downgrade resolves chats when wxid is unknown and the nickname is unique', () => {
+  withSameNameStore((store) => {
+    const chats = store.accessibleChats({ wxid: '', nickname: '老王' })
+    assert.deepEqual(chats, [{ chatWxid: 'g8@chatroom', name: '摄影群', isGroup: true }])
+  })
+})
+
+test('ADR-0032: nickname-only downgrade refuses (returns nothing) when the nickname is ambiguous, and the refusal is observable', () => {
+  // Own fixture (not withSameNameStore) so we can pass an onAmbiguousNickname
+  // spy instead of relying on the default console.error handler.
+  const file = path.join(os.tmpdir(), `wls-amb-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const db = makeDb(file)
+  insertRoster(db, { chat: 'g1@chatroom', name: '项目群', memberWxid: 'wxid_zhang', memberDisplay: '张三' })
+  insertRoster(db, { chat: 'g9@chatroom', name: '重名的别人的群', memberWxid: 'wxid_zhang_impostor', memberDisplay: '张三' })
+  db.close()
+  const calls = []
+  const store = new WechatLogStore({ file, onAmbiguousNickname: (info) => calls.push(info) })
+  try {
+    const chats = store.accessibleChats({ wxid: '', nickname: '张三' })
+    // Fail closed: neither group returned, not the union of both.
+    assert.deepEqual(chats, [])
+    // But the refusal is observable, with the reason attached — not a silent
+    // "user has no groups" that's indistinguishable from a real empty state.
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].nickname, '张三')
+    assert.deepEqual(calls[0].memberWxids.sort(), ['wxid_zhang', 'wxid_zhang_impostor'])
+  } finally {
+    store.close()
+    fs.rmSync(file, { force: true })
+  }
+})
+
+test('ADR-0032: empty-string member_wxid rows in chat_roster do not count toward ambiguity', () => {
+  // A group roster row can (in principle) have an unresolved member_wxid.
+  // That should not itself manufacture a false "ambiguous" collision against
+  // a single real person sharing the nickname.
+  const file = path.join(os.tmpdir(), `wls-amb2-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const db = makeDb(file)
+  insertRoster(db, { chat: 'g1@chatroom', name: '项目群', memberWxid: 'wxid_zhang', memberDisplay: '张三' })
+  db.close()
+  const store = new WechatLogStore({ file, onAmbiguousNickname: () => assert.fail('should not be called') })
+  try {
+    const chats = store.accessibleChats({ wxid: '', nickname: '张三' })
+    assert.deepEqual(chats, [{ chatWxid: 'g1@chatroom', name: '项目群', isGroup: true }])
+  } finally {
+    store.close()
+    fs.rmSync(file, { force: true })
+  }
+})
+
 // ---- ADR-0029: attachment 列的结构化解析 ----
 // 附件 JSON 样例照抄生产库真实抽样 + receiver.py 渲染段的权威字段名。
 

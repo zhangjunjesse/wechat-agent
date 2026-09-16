@@ -172,6 +172,68 @@ test('watcher reports unsynced attachments honestly and passes link shares throu
   }
 })
 
+// ---- ADR-0032: tiered wxid/nickname sender identification, not OR'd ----
+// Same root cause as accessibleChats: nickname isn't unique across verified
+// profiles. Here the stakes are actually higher than read-access — a wrong
+// match doesn't just show the wrong group, it PUSHES the agent's reply
+// (which can include private content, e.g. a fetched Feishu doc) to the
+// wrong person's private chat.
+
+test('ADR-0032: wxid match is authoritative — wrong-wxid same-nickname profile is never even considered', async () => {
+  const dbFile = makeDb([{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 100, sender_wxid: 'wx_real_a', sender_display: 'Z.俊', content: '@助手 读一下', attachment: QUOTE_ATTACHMENT }])
+  const cursorFile = path.join(os.tmpdir(), `gcmd-cur-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+  const calls = []
+  const agent = { respond: async (args) => { calls.push(args); return { text: 'ok' } } }
+  const provider = { sendText: async () => ({}) }
+  const profiles = [
+    { userId: 'u-b', nickname: 'Z.俊', wxid: 'wx_real_b', ilinkUserId: 'ilink_b' }, // 同名但 wxid 不对，排第一且有 token
+    { userId: 'u-a', nickname: 'Z.俊', wxid: 'wx_real_a', ilinkUserId: 'ilink_a' }, // 真正发消息的人
+  ]
+  const profileStore = { list: async () => profiles, get: async (id) => profiles.find((p) => p.userId === id) || null }
+  const contextTokens = { get: (id) => (id === 'ilink_a' ? { contextToken: 'tok-a', providerBotId: 'bot' } : id === 'ilink_b' ? { contextToken: 'tok-b', providerBotId: 'bot' } : null) }
+  const watcher = new GroupCommandWatcher({ dbFile, agent, provider, profileStore, contextTokens, cursorFile, initialCursor: 0, progress: { ackDelayMs: 5, intervalMs: 10_000 } })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 1)
+    // 必须投给真正发消息的 u-a（ilink_a），不是排第一、同名但 wxid 不对的 u-b
+    assert.equal(calls[0].userId, 'ilink_a')
+    assert.equal(calls[0].channel.toProviderUserId, 'ilink_a')
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
+test('ADR-0032: sender_wxid empty + nickname ambiguous across ≥2 distinct wxids → refuses rather than guessing', async () => {
+  const { cursorFile, watcher, calls } = setup({
+    rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 100, sender_display: 'Z.俊', content: '@助手 读一下', attachment: QUOTE_ATTACHMENT }], // 无 sender_wxid
+    profiles: [
+      { userId: 'u-a', nickname: 'Z.俊', wxid: 'wx_real_a', ilinkUserId: 'ilink_zj' }, // 有 token（复用 setup 默认认可的 ilink_zj）
+      { userId: 'u-b', nickname: 'Z.俊', wxid: 'wx_real_b', ilinkUserId: 'ilink_other' },
+    ],
+  })
+  try {
+    await watcher.sweep()
+    // 旧逻辑：昵称 OR 匹配到两个，挑第一个有 token 的（u-a）就会投出去——
+    // 但我们其实不知道这条群消息到底是谁发的（sender_wxid 缺失），不能猜。
+    assert.equal(calls.length, 0)
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
+test('ADR-0032: sender_wxid empty + nickname unique still works exactly as before (no regression on the common case)', async () => {
+  const { cursorFile, watcher, calls } = setup({
+    rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 100, sender_display: 'Z.俊', content: '@助手 读一下', attachment: QUOTE_ATTACHMENT }],
+  })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].userId, 'ilink_zj')
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
 test('cursor persists so restarts do not reprocess', async () => {
   const { dbFile, cursorFile, watcher, calls } = setup({
     rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', ts: 500, sender_display: 'Z.俊', content: '@助手 你好', attachment: QUOTE_ATTACHMENT }],

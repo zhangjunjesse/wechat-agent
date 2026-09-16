@@ -13,7 +13,8 @@ import { beijingDateTimeStr } from './time.mjs'
  *
  *   - 解析引用：`messages.attachment` 为 JSON `{kind:'quote', quoted_text,...}`，
  *     被引用的完整文本（如飞书文档链接）在 quoted_text 里；
- *   - 身份匹配：sender_display/sender_wxid 命中已验证用户（profileStore.list）；
+ *   - 身份匹配：sender_wxid 优先、sender_display 降级（分级而非并列 OR，
+ *     ADR-0032——同名不同人不会被互相错投）命中已验证用户（profileStore.list）；
  *   - 构造入站提示（场景 + 引用内容 + 指令 + 出处 + 能力提示），交给 agent：
  *     agent 可用 wechat_search_chat 自取群历史、lark_* 处理文档，按需调用；
  *   - 结果经 iLink 私聊 sendText 推送给该用户（bot 私聊通道，日报已验证）。
@@ -101,11 +102,27 @@ export class GroupCommandWatcher {
   }
 
   async #handle(row) {
-    // 1) 身份匹配：sender 命中哪些已验证用户（别人 @助手 不响应）
+    // 1) 身份匹配：sender 命中哪些已验证用户（别人 @助手 不响应）。
+    // ADR-0032：分级而不是并列 OR——群消息的 sender_wxid 一般是可信的真实身份
+    // （群花名册本就靠真实 wxid 消歧义，ADR-0007），命中了就**只**认它，昵称
+    // 不再参与，避免"昵称对上了但 wxid 对不上"把结果私聊推给同名的另一个人
+    // （比按 wxid 匹配更严重的方向——那是把别人的处理结果发错人，不只是读越界）。
+    // 只有 sender_wxid 缺失或没有任何档案的 wxid 与它匹配时，才降级到昵称匹配；
+    // 降级路径如果撞见多个不同 wxid 共享同一昵称，宁可不响应也不去猜是哪个人。
     const sender = String(row.sender_display || '').trim()
     const senderWxid = String(row.sender_wxid || '').trim()
     const profiles = await this.#profileStore.list()
-    const matched = profiles.filter((p) => (p?.nickname && sender && p.nickname === sender) || (p?.wxid && senderWxid && p.wxid === senderWxid))
+    const byWxid = senderWxid ? profiles.filter((p) => p?.wxid && p.wxid === senderWxid) : []
+    let matched
+    if (byWxid.length) {
+      matched = byWxid
+    } else if (sender) {
+      const byNickname = profiles.filter((p) => p?.nickname && p.nickname === sender)
+      const distinctWxids = new Set(byNickname.map((p) => String(p?.wxid || '')).filter(Boolean))
+      matched = distinctWxids.size > 1 ? [] : byNickname
+    } else {
+      matched = []
+    }
     // 同名档案可能有多个（含无 token 的测试/历史残留）：选第一个有有效私聊通道的
     let user = null
     for (const p of matched) {
