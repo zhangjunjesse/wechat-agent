@@ -10,7 +10,7 @@
 - 目标：多租户微信个人助手——腾讯 iLink Bot 扫码绑定 + 消息通道，OpenAI Agents
   SDK（deepseek）Agent 对话，公网同步的微信聊天记录做用户资料核验与上下文。
 - 公网入口：`https://datadefender.cn/wechat-agent/`
-- 测试：`npm test`（node --test，当前 **336/336 全绿**）；启动 `npm start`
+- 测试：`npm test`（node --test，当前 **342/342 全绿**）；启动 `npm start`
 
 ## 架构速览
 
@@ -162,11 +162,18 @@
 - 公网页：`GET /reports/<id>`（响应式 HTML）+ `/poster`（海报 PNG）+ `/cover`（兼容旧封面），
   兼容 `/wechat-agent` 子路径。
 - 追问：`get_daily_report` 工具（仅已订阅/已创建任务的最近报告）→ agent 可「第 N 条展开讲讲」。
-- **主题订阅（ADR-0019，per-user 严格隔离）**：用户可对自己的公共任务设置关注主题
-  （`update_report_topics`/`list_report_topics` 工具；对话里说「订阅 AI 主题」即完成）。
-  到点生成 = 公共版一次（无主题订阅者共享）+ 每个有主题用户**单独生成**贴合自己主题
-  的日报（prompt 注入主题、报告/去重按用户维度隔离、海报标题带主题徽标、公网链接独立）。
+- **主题订阅（ADR-0019 per-user 隔离 + ADR-0027 按主题独立成篇）**：用户可对自己的
+  公共任务设置关注主题（`update_report_topics`/`list_report_topics` 工具；对话里说
+  「订阅 AI 主题」即完成；上限 `MAX_REPORT_TOPICS=5`，与工具文案一致）。
+  到点生成 = 公共版一次（无主题订阅者共享）+ 有主题用户**每个主题各自独立生成**一份
+  （不合并）：各自 prompt、各自去重窗口（`{userId, topic}` 双维度）、各自海报（标题
+  只显示自己那一个主题）、各自一条推送——订阅 N 个主题 = 当天收到 N 条独立推送。
+  一个主题生成失败不连累同一用户的其他主题。`get_daily_report`/`resend_daily_report`
+  不传 `topic` 时默认覆盖当天全部主题（追问列全部/补发发全部），传了只处理那一份。
+  设置主题的确认话术如实告知"这 N 个主题会各自独立推送"，不再暗示"合并成一份"。
   主动引导三入口：订阅回执提示、海报底部引导行、推送短描述。
+  触发：用户反馈"订阅了多个主题，为什么每天还是只有一份日报"——三个方案（保持
+  1 份+保底名额 / 每主题独立 / 1 份但分区展示）当面征询后用户选择"每主题独立"。
 - **引导效果度量（ADR-0020）**：`guide_events` 埋点（曝光 `guide_shown`：subscribe/push；
   转化 `guide_converted`：chat）+ `scripts/guide-stats.mjs` 统计脚本（漏斗/入口分布/
   平均转化耗时/7 天趋势；生产 `TASKS_FILE=/data/tasks.db node scripts/guide-stats.mjs`）。
@@ -279,6 +286,28 @@
 - 决策：`docs/ADR-0026-report-reliability.md`。
 - 遗留：9/16 当天报告的旧失败记录发生在新代码部署前，新的重试逻辑不会自动
   追溯重跑，需要一次手动触发补齐（见部署记录）。
+
+## 日报按主题独立成篇（ADR-0027，2026-09-16）
+
+- 触发：用户提问"订阅了多个主题，每天还是只会有一个日报？？？我理解订阅几个
+  就有几个啊"——ADR-0019 的"多主题"其实是合并进**一次**生成，由模型自行权衡
+  各主题名额，没有保底，用户订阅了却感觉不到区别。
+- 这是产品判断（直接决定用户每天收到几条推送、系统成本涨几倍），当面给了三个
+  方案（1 份+保底 / 每主题独立 / 1 份分区展示）征询，用户选**方案 2：每主题独立**。
+- 改法：调度器对有主题的用户，从"1 次调用带全部主题"改为"每个主题各自 1 次独立
+  调用"（各自 prompt/去重窗口/海报/推送，一个主题失败不连累其他主题）；
+  `ReportStore` 加 `topic` 维度（`reports.topic` 列 + `reportIdOf`/`recentFingerprints`/
+  `recentTitles`/`listReports` 全部按 `{userId, topic}` 双维度隔离，不传 topic 时哈希
+  与 ADR-0019 时代完全一致，老数据不受影响）；`get_daily_report`/`resend_daily_report`
+  新增可选 `topic` 参数，不传时默认覆盖当天全部主题；主题上限从代码里实际的 10
+  收紧到工具文案早就承诺的 5（`MAX_REPORT_TOPICS`）；`update_report_topics` 确认话术
+  改为如实告知"这 N 个主题会各自独立推送，你每天收到 N 条"，不再暗示"合并成一份"。
+- 验证：`node --test tests/*.test.mjs` → **342/342 全绿**（基线 336 + 新增 6：
+  report-store 2、task-scheduler 2、task-tools 1、task-store 1；另有对既有测试
+  追加的确认话术/主题徽标断言，不计入新增用例数）。
+- 决策：`docs/ADR-0027-per-topic-reports.md`（延伸 ADR-0019 的 per-user 隔离到
+  per-user-per-topic）。
+- 遗留：效果未经生产实测；没有做"多主题但合并成一份"的中间态退路。
 
 ## 会话时间感知（ADR-0015）
 

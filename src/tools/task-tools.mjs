@@ -2,10 +2,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { tool } from '@openai/agents'
 import { nextRunAt, describeSchedule } from '../services/schedule.mjs'
+import { MAX_REPORT_TOPICS } from '../services/task-store.mjs'
 import { beijingParts } from '../services/time.mjs'
 import { renderPushText } from '../services/daily-report.mjs'
 
-/** 定时任务工具集（DESIGN-timed-tasks.md + DESIGN-daily-report.md + ADR-0026）。
+/** 定时任务工具集（DESIGN-timed-tasks.md + DESIGN-daily-report.md + ADR-0026 + ADR-0027）。
  *
  * 私有任务（create/list/delete）由用户自己管理；公共任务目录 + 订阅/退订
  * 控制全局任务的加入。userId 来自 run context，所有操作只影响本人。
@@ -15,7 +16,10 @@ import { renderPushText } from '../services/daily-report.mjs'
  * 两者分工是事故教训（ADR-0026）：此前"补发"被路由到 get_daily_report，模型
  * 拿到纯文本后自己现编了一整段带 Markdown、带裸链接、没有图的回复——和真实
  * 推送的样子完全对不上。现在"重新发一遍"必须走会调 provider.sendImage 的
- * resend_daily_report，不给模型现场编排的机会。 */
+ * resend_daily_report，不给模型现场编排的机会。
+ *
+ * ADR-0027：用户订阅多个主题时当天有多份独立报告（每主题一份），两个工具都
+ * 支持可选 `topic` 参数只取/只发某一份，不填则覆盖当天全部主题。 */
 export function taskTools({ taskStore, reportStore = null, now = () => Date.now(), provider = null, reportUrl = null } = {}) {
   const createTask = tool({
     name: 'create_task',
@@ -133,32 +137,36 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
     description:
       '查看最近一份定时任务报告（如每日早报）的条目内容（标题/摘要/来源），用于**追问某一条的细节**。' +
       '用户追问"早报第3条展开讲讲""今天的早报讲了什么"时使用；如需更详细信息可再配合 gzh_content 抓取原文。' +
+      '⚠️ 用户订阅了多个主题时（ADR-0027），当天会有**多份独立报告**（每个主题各一份）；' +
+      '不指定 topic 时本工具会把当天所有主题的报告都列出来。' +
       '⚠️ 用户是要求**重新推送**（"早报补发一下""没收到再发一次""早报重发"）时，不要用这个工具' +
       '现编一段文字回复——改用 resend_daily_report，那个才会真的重发原始的图+短描述。',
     parameters: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: '报告对应的任务名（不填则取该用户已订阅任务的最近一份报告）' },
+        name: { type: 'string', description: '报告对应的任务名（不填则取该用户已订阅任务的最近报告）' },
+        topic: { type: 'string', description: '只看某个主题的那一份（用户订阅了多个主题时可指定，如"AI"）；不填则返回当天所有主题的报告' },
       },
       required: [],
     },
     execute: async (input, ctx) => {
       const userId = ctx?.context?.userId
       if (!reportStore) return '报告功能未启用。'
-      const found = findLatestReport({ taskStore, reportStore, userId, name: input.name })
+      const found = findLatestReport({ taskStore, reportStore, userId, name: input.name, topic: input.topic })
       if (!found.ok) return found.reason === 'not_subscribed' ? `你未订阅/未创建任务「${input.name}」，无法查看其报告。` : '未找到报告。'
-      const report = found.report
-      const p = beijingParts(report.runAt)
-      const date = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
-      const lines = [`📰 ${report.name} · ${date}`]
-      if (report.focus) lines.push(`🎯 今日关注：${report.focus}`)
-      report.items.forEach((it, i) => {
-        // 不带原文链接（对齐海报"来源不放裸 URL"的规矩，ADR-0026）；需要原文
-        // 时模型应配合 gzh_content 去抓正文，而不是把裸链接甩给用户。
-        lines.push(`${i + 1}. ${it.title}${it.source ? `（${it.source}）` : ''}`)
-        if (it.summary) lines.push(`　${it.summary}`)
-      })
-      return lines.join('\n')
+      return found.reports.map((report) => {
+        const p = beijingParts(report.runAt)
+        const date = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
+        const lines = [report.topic ? `📰 ${report.name}（${report.topic}）· ${date}` : `📰 ${report.name} · ${date}`]
+        if (report.focus) lines.push(`🎯 今日关注：${report.focus}`)
+        report.items.forEach((it, i) => {
+          // 不带原文链接（对齐海报"来源不放裸 URL"的规矩，ADR-0026）；需要原文
+          // 时模型应配合 gzh_content 去抓正文，而不是把裸链接甩给用户。
+          lines.push(`${i + 1}. ${it.title}${it.source ? `（${it.source}）` : ''}`)
+          if (it.summary) lines.push(`　${it.summary}`)
+        })
+        return lines.join('\n')
+      }).join('\n\n')
     },
   })
 
@@ -169,11 +177,15 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       '和当时自动推送的一模一样。用户说"早报补发一下""日报没收到，再发一次""早报重发"这类' +
       '要求重新推送的话时用这个工具本身发送，**不要**先调 get_daily_report 拿文字内容再自己在' +
       '聊天里重新组织一遍——那样会丢图、模型自己加的 Markdown 微信不会渲染、还会把原文链接' +
-      '直接摆出来（生产事故复现过，见 ADR-0026）。调用后不需要再复述报告内容，一句话确认即可。',
+      '直接摆出来（生产事故复现过，见 ADR-0026）。' +
+      '⚠️ 用户订阅了多个主题时（ADR-0027），不指定 topic 会把当天**所有主题**的报告都重发一遍' +
+      '（各自一图一文）；用户只提到某个主题（如"AI 那份重发一下"）时传 topic 只发那一份。' +
+      '调用后不需要再复述报告内容，一句话确认即可。',
     parameters: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: '报告对应的任务名（不填则取该用户已订阅任务的最近一份报告）' },
+        name: { type: 'string', description: '报告对应的任务名（不填则取该用户已订阅任务的最近报告）' },
+        topic: { type: 'string', description: '只重发某个主题的那一份；不填则重发当天所有主题的报告' },
       },
       required: [],
     },
@@ -183,25 +195,33 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       if (!reportStore) return '报告功能未启用。'
       if (!provider) return '发送能力未就绪，无法补发。'
       if (!channel?.providerBotId || !channel?.contextToken) return '当前渠道不支持发送图片，请在微信对话中重试。'
-      const found = findLatestReport({ taskStore, reportStore, userId, name: input.name })
+      const found = findLatestReport({ taskStore, reportStore, userId, name: input.name, topic: input.topic })
       if (!found.ok) return found.reason === 'not_subscribed' ? `你未订阅/未创建任务「${input.name}」，无法补发其报告。` : '未找到报告，无法补发。'
-      const report = found.report
-      const p = beijingParts(report.runAt)
-      const date = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
-      let sentImage = false
-      if (report.posterPath) {
-        try {
-          const buffer = await fs.promises.readFile(report.posterPath)
-          await provider.sendImage({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName: path.basename(report.posterPath), buffer })
-          sentImage = true
-        } catch { /* 海报文件缺失/读取失败：仍发文字版说明，不整体失败 */ }
+      const sent = []
+      for (const report of found.reports) {
+        const p = beijingParts(report.runAt)
+        const date = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
+        let sentImage = false
+        if (report.posterPath) {
+          try {
+            const buffer = await fs.promises.readFile(report.posterPath)
+            await provider.sendImage({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, fileName: path.basename(report.posterPath), buffer })
+            sentImage = true
+          } catch { /* 海报文件缺失/读取失败：仍发文字版说明，不整体失败 */ }
+        }
+        const topics = report.topic ? [report.topic] : []
+        const text = renderPushText(report, { reportUrl: reportUrl ? reportUrl(report.id) : '', topics, resend: true })
+        await provider.sendText({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, text })
+        sent.push({ name: report.name, date, topic: report.topic, sentImage })
       }
-      const topics = taskStore.getReportTopics ? taskStore.getReportTopics(report.name, userId) : []
-      const text = renderPushText(report, { reportUrl: reportUrl ? reportUrl(report.id) : '', topics, resend: true })
-      await provider.sendText({ providerBotId: channel.providerBotId, toProviderUserId: channel.toProviderUserId, contextToken: channel.contextToken, text })
-      return sentImage
-        ? `已重新发送 ${date} 的${report.name}（图+说明），不用再复述内容了。`
-        : `${date} 的${report.name}没有保存海报图（可能当时降级过），已重发文字版说明。`
+      const label = (s) => `${s.date}${s.topic ? `·${s.topic}` : ''}`
+      if (sent.length === 1) {
+        const s = sent[0]
+        return s.sentImage
+          ? `已重新发送 ${label(s)} 的${s.name}（图+说明），不用再复述内容了。`
+          : `${label(s)} 的${s.name}没有保存海报图（可能当时降级过），已重发文字版说明。`
+      }
+      return `已重新发送 ${sent.length} 份：${sent.map((s) => `${s.name}·${label(s)}${s.sentImage ? '' : '（无图，文字版）'}`).join('、')}，不用再复述内容了。`
     },
   })
 
@@ -209,13 +229,15 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
     name: 'update_report_topics',
     description:
       '设置用户自己对一个已订阅公共任务的个性化主题（如「订阅 AI 主题」「关注 芯片 新能源」）。' +
-      '设置后该任务的日报将围绕这些主题单独生成（只影响自己，不串他人）。传空列表 topics 表示清除个性化，回到公共版。' +
+      '⚠️ 每个主题当天都会独立生成并推送一份（各自一图一文，ADR-0027），不是合并成一份——' +
+      '设 3 个主题 = 每天收到 3 条独立推送，告知用户时请说清楚这一点，避免用户以为只是"分区展示"。' +
+      '传空列表 topics 表示清除个性化，回到公共版（每天只有 1 条）。' +
       '用户表达"订阅/关注/想要 XX 主题、想定制日报、换个主题"时使用。',
     parameters: {
       type: 'object',
       properties: {
         name: { type: 'string', description: '已订阅的公共任务名（如「每日早报」）' },
-        topics: { type: 'array', items: { type: 'string' }, description: '感兴趣的主题列表（1-5 个，如 ["AI","芯片"]；空数组 = 清除个性化）' },
+        topics: { type: 'array', items: { type: 'string' }, description: `感兴趣的主题列表（1-${MAX_REPORT_TOPICS} 个，如 ["AI","芯片"]；空数组 = 清除个性化）。每多一个主题，用户每天就多收到一条独立推送，不要无脑帮用户加满。` },
       },
       required: ['name', 'topics'],
     },
@@ -224,9 +246,10 @@ export function taskTools({ taskStore, reportStore = null, now = () => Date.now(
       try {
         const topics = taskStore.setReportTopics({ globalName: input.name, userId, topics: input.topics || [] })
         taskStore.recordGuideEvent({ userId, event: 'guide_converted', entry: 'chat', taskName: input.name })
-        return topics.length
-          ? `已设置「${input.name}」的个性化主题：${topics.join('、')}。从下次推送起，日报会围绕这些主题生成（只对你生效）。随时可改：告诉我新的主题即可。`
-          : `已清除「${input.name}」的个性化主题，回到公共版日报。`
+        if (!topics.length) return `已清除「${input.name}」的个性化主题，回到公共版日报（每天 1 条）。`
+        return topics.length === 1
+          ? `已设置「${input.name}」的个性化主题：${topics[0]}。从下次推送起，日报会围绕这个主题生成（只对你生效）。随时可改：告诉我新的主题即可。`
+          : `已设置「${input.name}」的个性化主题：${topics.join('、')}。这 ${topics.length} 个主题从下次推送起会**各自独立生成一份、各发一条**（不是合并成一份），也就是你每天会收到 ${topics.length} 条早报推送。只对你生效；嫌多的话随时可以告诉我减少几个主题，或清空回到公共版（每天 1 条）。`
       } catch (e) {
         return `设置失败：${e.message}`
       }
@@ -253,36 +276,52 @@ export function taskNextRun(schedule, nowMs = Date.now()) {
   return nextRunAt(schedule, nowMs)
 }
 
-/** 找该用户能看的最近一份报告：不指定 name → 遍历已订阅的 report 类任务取最新
- * （个性化优先于公共版）；指定 name → 只在该用户订阅/自建的同名任务里找。
- * get_daily_report（追问细节）与 resend_daily_report（补发原始推送）共用同一份
- * 查找逻辑（ADR-0026）——避免两处各写一遍、行为跑偏。 */
-function findLatestReport({ taskStore, reportStore, userId, name }) {
-  const latestFor = (taskId) => {
-    const mine = reportStore.listReports(taskId, 1, { userId })
-    const shared = reportStore.listReports(taskId, 1)
-    const cands = [...mine, ...shared].sort((a, b) => b.runAt - a.runAt)
-    return cands.length ? reportStore.getReport(cands[0].id) : null
+/** 某任务在该用户视角下"当前"的报告集合（ADR-0027）：
+ *   - 该用户没设个性化主题 → 公共版 1 份；
+ *   - 设了 N 个主题 → 每个主题各自独立 1 份（不合并），共 N 份；
+ *   - 指定 `topic` → 只要该主题那 1 份（该用户没订这个主题则返回空数组）。
+ * `taskName` 为空（自建私有任务）时没有主题概念，等同公共版分支。 */
+function reportsForTaskAndUser({ taskStore, reportStore, taskId, taskName, userId, topic }) {
+  const userTopics = taskName && taskStore.getReportTopics ? taskStore.getReportTopics(taskName, userId) : []
+  if (topic) {
+    if (userTopics.length && !userTopics.includes(topic)) return []
+    const list = reportStore.listReports(taskId, 1, { userId, topic })
+    return list.length ? [reportStore.getReport(list[0].id)] : []
   }
+  if (userTopics.length) {
+    return userTopics
+      .map((tp) => reportStore.listReports(taskId, 1, { userId, topic: tp }))
+      .filter((l) => l.length)
+      .map((l) => reportStore.getReport(l[0].id))
+  }
+  const shared = reportStore.listReports(taskId, 1)
+  return shared.length ? [reportStore.getReport(shared[0].id)] : []
+}
+
+/** 找该用户能看的最近报告集合：不指定 name → 遍历已订阅的 report 类任务，取
+ * "当前报告集合"最新的那个任务；指定 name → 只在该用户订阅/自建的同名任务里找。
+ * get_daily_report（追问细节）与 resend_daily_report（补发原始推送）共用同一份
+ * 查找逻辑（ADR-0026），返回值统一是 `reports` 数组（ADR-0027：一个任务当天
+ * 可能有多份——每个订阅主题各一份）而不是单个 `report`。 */
+function findLatestReport({ taskStore, reportStore, userId, name, topic }) {
   if (name) {
     // 只允许查看自己订阅的公共任务 / 自己创建的任务的报告
     const sub = taskStore.listGlobalTasks().find((t) => t.name === name && t.subscribers.includes(userId))
     const mine = taskStore.listUserTasks(userId).find((t) => t.name === name)
     if (!sub && !mine) return { ok: false, reason: 'not_subscribed' }
     const taskId = sub ? `global-${sub.name}` : `user-${userId}-${mine.name}`
-    const report = latestFor(taskId)
-    return report ? { ok: true, report } : { ok: false, reason: 'not_found' }
+    const reports = reportsForTaskAndUser({ taskStore, reportStore, taskId, taskName: sub ? name : '', userId, topic })
+    return reports.length ? { ok: true, reports } : { ok: false, reason: 'not_found' }
   }
-  // 已订阅的报告类公共任务中取最近一份（含个性化）
-  let best = null
+  // 未指定任务名：已订阅的报告类任务里，取"当前报告集合"里最新一条所属的那个任务
+  let bestReports = null
+  let bestAt = -1
   for (const t of taskStore.listGlobalTasks()) {
     if (t.kind !== 'report' || !t.subscribers.includes(userId)) continue
-    const taskId = `global-${t.name}`
-    const mine = reportStore.listReports(taskId, 1, { userId })
-    const shared = reportStore.listReports(taskId, 1)
-    const cands = [...mine, ...shared].sort((a, b) => b.runAt - a.runAt)
-    if (cands.length && (!best || cands[0].runAt > best.runAt)) best = cands[0]
+    const reports = reportsForTaskAndUser({ taskStore, reportStore, taskId: `global-${t.name}`, taskName: t.name, userId, topic })
+    if (!reports.length) continue
+    const at = Math.max(...reports.map((r) => r.runAt))
+    if (at > bestAt) { bestAt = at; bestReports = reports }
   }
-  const report = best ? reportStore.getReport(best.id) : null
-  return report ? { ok: true, report } : { ok: false, reason: 'not_found' }
+  return bestReports ? { ok: true, reports: bestReports } : { ok: false, reason: 'not_found' }
 }

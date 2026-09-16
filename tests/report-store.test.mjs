@@ -124,6 +124,48 @@ test('recentFingerprints/recentTitles accept an injectable `now` (fixes 2026-09-
   }
 })
 
+test('reportIdOf: topic changes the id, but omitting it reproduces the pre-ADR-0027 id exactly (ADR-0027)', () => {
+  const day = Date.UTC(2026, 8, 16, 0, 30)
+  // 不传 topic：与老哈希输入完全一致（老数据 id 不受这次迁移影响）
+  assert.equal(reportIdOf('global-x', day, 'u1'), reportIdOf('global-x', day, 'u1', ''))
+  // 传了不同 topic：id 互不相同，且都不同于「同用户无主题」的 id
+  const noTopic = reportIdOf('global-x', day, 'u1')
+  const ai = reportIdOf('global-x', day, 'u1', 'AI')
+  const chip = reportIdOf('global-x', day, 'u1', '芯片')
+  assert.notEqual(ai, noTopic)
+  assert.notEqual(chip, noTopic)
+  assert.notEqual(ai, chip)
+  // 同一 (task, user, topic, day) 稳定
+  assert.equal(ai, reportIdOf('global-x', day, 'u1', 'AI'))
+})
+
+test('a user with multiple topics gets fully isolated reports: distinct ids, dedup windows and listReports (ADR-0027)', () => {
+  const { file, store } = setup()
+  try {
+    const now = Date.now()
+    const ai = store.saveReport({ taskId: 't1', name: '早报', runAt: now, userId: 'u1', topic: 'AI', items: [{ title: 'AI新闻', summary: '', source: '', url: '' }] })
+    const chip = store.saveReport({ taskId: 't1', name: '早报', runAt: now, userId: 'u1', topic: '芯片', items: [{ title: '芯片新闻', summary: '', source: '', url: '' }] })
+    // 同一用户、同一天、不同主题 → 不同 id，互不覆盖
+    assert.notEqual(ai.id, chip.id)
+    assert.equal(store.getReport(ai.id).topic, 'AI')
+    assert.equal(store.getReport(chip.id).topic, '芯片')
+    assert.equal(store.getReport(ai.id).items[0].title, 'AI新闻')
+    assert.equal(store.getReport(chip.id).items[0].title, '芯片新闻')
+    // 去重窗口按 (用户, 主题) 隔离：AI 的指纹不出现在芯片的窗口里，反之亦然
+    assert.ok(store.recentFingerprints('t1', 7, { userId: 'u1', topic: 'AI' }).has(fingerprintOf('AI新闻')))
+    assert.ok(!store.recentFingerprints('t1', 7, { userId: 'u1', topic: 'AI' }).has(fingerprintOf('芯片新闻')))
+    assert.ok(store.recentFingerprints('t1', 7, { userId: 'u1', topic: '芯片' }).has(fingerprintOf('芯片新闻')))
+    assert.ok(!store.recentFingerprints('t1', 7, { userId: 'u1', topic: '芯片' }).has(fingerprintOf('AI新闻')))
+    assert.deepEqual(store.recentTitles('t1', 7, 20, { userId: 'u1', topic: 'AI' }), ['AI新闻'])
+    // listReports 按主题过滤；不传 topic（默认 ''）既不匹配 AI 也不匹配芯片
+    assert.deepEqual(store.listReports('t1', 5, { userId: 'u1', topic: 'AI' }).map((r) => r.id), [ai.id])
+    assert.deepEqual(store.listReports('t1', 5, { userId: 'u1', topic: '芯片' }).map((r) => r.id), [chip.id])
+    assert.equal(store.listReports('t1', 5, { userId: 'u1' }).length, 0)
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})
+
 test('user-scoped reports are isolated from the shared version (ADR-0019)', () => {
   const { file, store } = setup()
   try {

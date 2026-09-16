@@ -16,6 +16,11 @@ import { buildReportPrompt, parseReportJson, dedupeItems, renderReportPoster, re
  * **渲染海报长图**（posterRender：HTML → PNG，纯 CSS 科技风头图，ADR-0018）→
  * 向订阅者推送「海报长图 + 短描述（含公网 URL）」。
  *
+ * **个性化主题（ADR-0019）按主题独立成篇（ADR-0027）**：未设主题的订阅者共享
+ * 一份公共版；设了 N 个主题的用户，当天收到 **N 份独立的**海报+推送——每个
+ * 主题各自生成、各自去重、各自海报，不合并成一份让模型自己权衡分配（那样会
+ * 出现"订阅了却看不出区别"甚至"某主题当天被挤到 0 条而不自知"）。
+ *
  * **失败重试（ADR-0026）**：`lastRunAt` 只在"本周期已结束"（成功，或重试耗尽放弃）
  * 时才推进；一次完全失败（如 LLM 402/限流）不会让任务静默等到明天——按
  * `retryIntervalMs` 节流、在同一天内重试 `retryMax` 次，仍失败才放弃并如实
@@ -137,8 +142,10 @@ export class TaskScheduler {
     return { results, retry }
   }
 
-  /** 报告类公共任务：公共版一次生成（无主题订阅者共享）+ 每个有主题用户单独生成
-   * 个性化版（ADR-0019：per-user 主题，严格隔离），各自渲染海报并推送。
+  /** 报告类公共任务：公共版一次生成（无主题订阅者共享）+ 有主题用户按**每个主题
+   * 独立生成**个性化版（ADR-0027：订阅 N 个主题就收到 N 份独立海报+推送，不再
+   * 合并成一份让模型自己权衡分配——那样用户订阅了多个主题也看不出区别，某个
+   * 主题当天还可能被挤到 0 条而不自知）。各自独立生成、独立去重、独立海报。
    * 返回 { results, retry }：`retry` = 尝试过生成但一份都没成功（如 402/限流），
    * 值得短间隔重试；只要至少一份成功就不重试（不重复打扰已收到的订阅者）。 */
   async #runReportTask(task, { attemptNumber = 1, isLastAttempt = true } = {}) {
@@ -153,7 +160,7 @@ export class TaskScheduler {
     // ① 公共版：未设主题的订阅者共享一份（生成一次，不随人数翻倍）
     if (plainUsers.length) {
       anyAttempted = true
-      const r = await this.#generateAndStore(task, null, now, [])
+      const r = await this.#generateAndStore(task, null, now, '')
       if (r.ok) {
         anySucceeded = true
         for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
@@ -164,17 +171,20 @@ export class TaskScheduler {
       }
     }
 
-    // ② 个性化版：每个设了主题的订阅者单独生成（内容贴合自己主题，互不串）
+    // ② 个性化版：每个设了主题的订阅者，**每个主题各自单独生成**一份（互不合并、
+    // 互不串），失败按主题各自降级，不因一个主题失败连累其他主题。
     for (const userId of subscribers.filter((u) => topicsByUser[u]?.length)) {
-      anyAttempted = true
-      const r = await this.#generateAndStore(task, userId, now, topicsByUser[userId])
-      if (r.ok) {
-        anySucceeded = true
-        results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report, topicsByUser[userId])))
-      } else {
-        const text = r.rawText || this.#failureText(task, attemptNumber, isLastAttempt)
-        results.push(await this.#fanoutReport(task, userId, '', text))
-        results.push({ userId: `task-${task.id}-${userId}`, error: r.error }) // 个性化失败可观测
+      for (const topic of topicsByUser[userId]) {
+        anyAttempted = true
+        const r = await this.#generateAndStore(task, userId, now, topic)
+        if (r.ok) {
+          anySucceeded = true
+          results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report, [topic])))
+        } else {
+          const text = r.rawText || this.#failureText(task, attemptNumber, isLastAttempt)
+          results.push(await this.#fanoutReport(task, userId, '', text))
+          results.push({ userId: `task-${task.id}-${userId}-${topic}`, error: r.error }) // 个性化失败可观测（按主题定位）
+        }
       }
     }
 
@@ -191,12 +201,16 @@ export class TaskScheduler {
     return `【定时任务「${task.name}」】本次生成失败，系统会自动重试，无需操作。`
   }
 
-  /** 生成并入库一份报告（userId 为空 = 公共版；非空 = 该用户个性化版）。 */
-  async #generateAndStore(task, userId, now, topics = []) {
-    const runUserId = `task-${task.id}${userId ? `-${userId}` : ''}` // 合成用户：ephemeral 执行
+  /** 生成并入库一份报告（userId 为空 = 公共版；非空 = 该用户个性化版）。
+   * `topic`（ADR-0027）：非空时只代表**单个**主题——调用方对用户的每个订阅主题
+   * 各调一次本方法，而不是把多个主题合并进一次调用；这样每个主题的 prompt、
+   * 去重窗口、生成结果、海报都完全独立，一个主题的新闻不会挤占另一个主题的名额。 */
+  async #generateAndStore(task, userId, now, topic = '') {
+    const runUserId = `task-${task.id}${userId ? `-${userId}` : ''}${topic ? `-${topic}` : ''}` // 合成用户：ephemeral 执行，主题独立会话
+    const topics = topic ? [topic] : []
     try {
-      // 近 7 天已报道标题注入 prompt 要求回避（去重窗口按用户维度隔离）
-      const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '', now })
+      // 近 7 天已报道标题注入 prompt 要求回避（去重窗口按用户+主题维度隔离）
+      const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '', topic, now })
       const reply = await this.#agent.respond({
         userId: runUserId,
         text: buildReportPrompt(task, recent, { topics }),
@@ -207,9 +221,9 @@ export class TaskScheduler {
       const rawText = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
       const parsed = parseReportJson(rawText)
       if (!parsed.ok) return { ok: false, error: 'report_unparsable', rawText }
-      // 机械去重（指纹比对近 7 天；删后不足 3 条保底不删）
-      const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '', now }))
-      let report = this.#reportStore.saveReport({ taskId: task.id, name: task.name, runAt: now, focus: parsed.focus, rawText, items: deduped.items, userId: userId || '' })
+      // 机械去重（指纹比对近 7 天同一用户+主题的历史；删后不足 3 条保底不删）
+      const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '', topic, now }))
+      let report = this.#reportStore.saveReport({ taskId: task.id, name: task.name, runAt: now, focus: parsed.focus, rawText, items: deduped.items, userId: userId || '', topic })
       // 海报长图（ADR-0018）：HTML → PNG；失败非致命，降级为纯文本短描述
       if (this.#posterRender) {
         try {

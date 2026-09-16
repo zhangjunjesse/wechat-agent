@@ -376,10 +376,9 @@ test('report topics: per-user personalized runs are isolated and never shared (A
   // 按 prompt 内容回不同 JSON（用主题区分，方便断言隔离）
   const agent = { respond: async (args) => {
     calls.push(args)
-    const isAI = /个性化主题：AI/.test(args.text)
     const isRobot = /个性化主题：机器人/.test(args.text)
     const items = [
-      { title: isAI ? 'AI头条' : isRobot ? '机器人头条' : '公共头条', summary: 's', source: 'src', url: 'https://x.com' },
+      { title: isRobot ? '机器人头条' : '公共头条', summary: 's', source: 'src', url: 'https://x.com' },
       { title: '条目B', summary: 's2', source: 'src2', url: 'https://y.com' },
       { title: '条目C', summary: 's3', source: 'src3', url: 'https://z.com' },
     ]
@@ -391,36 +390,109 @@ test('report topics: per-user personalized runs are isolated and never shared (A
     store.subscribe('每日早报', 'u1')
     store.subscribe('每日早报', 'u2')
     store.subscribe('每日早报', 'u3')
-    // u1 订阅 AI 主题、u2 订阅 机器人 主题、u3 无主题
-    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
-    store.setReportTopics({ globalName: '每日早报', userId: 'u2', topics: ['机器人'] })
+    // u1 订阅 机器人 主题、u2 无主题（公共版）
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['机器人'] })
     await scheduler.sweep()
-    // 生成次数 = 公共版 1 + u1 1 + u2 1 = 3（无主题 u3 共享公共版）
-    assert.equal(calls.length, 3)
-    // prompt 隔离：u1 的 prompt 只含 AI，u2 的只含机器人，公共版两者皆无
-    const u1Prompt = calls.find((c) => c.userId === 'task-global-每日早报-u1').text
-    const u2Prompt = calls.find((c) => c.userId === 'task-global-每日早报-u2').text
+    // 生成次数 = 公共版 1（u2/u3 共享）+ u1 1 = 2
+    assert.equal(calls.length, 2)
+    // prompt 隔离：u1 的 prompt 只含机器人，公共版不含
+    const u1Prompt = calls.find((c) => c.userId === 'task-global-每日早报-u1-机器人').text
     const sharedPrompt = calls.find((c) => c.userId === 'task-global-每日早报').text
-    assert.match(u1Prompt, /个性化主题：AI/)
-    assert.doesNotMatch(u1Prompt, /个性化主题：机器人/)
-    assert.match(u2Prompt, /个性化主题：机器人/)
-    assert.doesNotMatch(u2Prompt, /个性化主题：AI/)
+    assert.match(u1Prompt, /个性化主题：机器人/)
     assert.doesNotMatch(sharedPrompt, /个性化主题：/)
-    // 报告按用户维度入库：3 份不同 id 的报告
+    // 报告按用户+主题维度入库：2 份不同 id 的报告
     const shared = reportStore.listReports('global-每日早报', 5)
-    const u1Reps = reportStore.listReports('global-每日早报', 5, { userId: 'u1' })
-    const u2Reps = reportStore.listReports('global-每日早报', 5, { userId: 'u2' })
+    const u1Reps = reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '机器人' })
     assert.equal(shared.length, 1)
     assert.equal(u1Reps.length, 1)
-    assert.equal(u2Reps.length, 1)
-    assert.equal(reportStore.getReport(u1Reps[0].id).items[0].title, 'AI头条')
-    assert.equal(reportStore.getReport(u2Reps[0].id).items[0].title, '机器人头条')
+    assert.equal(reportStore.getReport(u1Reps[0].id).items[0].title, '机器人头条')
+    assert.equal(reportStore.getReport(u1Reps[0].id).topic, '机器人')
     assert.equal(reportStore.getReport(shared[0].id).items[0].title, '公共头条')
-    // 推送隔离：每条短文本都带各自报告的 URL（id 不同 = 不串）
-    assert.equal(sent.length, 3)
+    // 推送隔离：每条短文本都带各自报告的 URL（id 不同 = 不串），个性化的带主题提示
+    assert.equal(sent.length, 3) // u1 一条 + u2/u3 各一条共享文本
+    const u1Msg = sent.find((m) => m.toProviderUserId === 'u1')
+    assert.match(u1Msg.text, /当前主题：机器人/)
     const urls = sent.map((m) => (/https:\/\/reports\.local\/(rp-[^\n]+)/.exec(m.text) || [])[1])
-    assert.equal(new Set(urls).size, 3)
+    assert.equal(new Set(urls).size, 2) // u1 的主题版 + u2/u3 共享的公共版
     assert.ok(urls.every(Boolean))
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ADR-0027：订阅 N 个主题 = 当天收到 N 份独立报告（各自生成/去重/海报），
+// 不再合并成一份让模型自行权衡分配——那样订阅多个主题也看不出区别。
+test('a user with multiple topics gets one independent report+push per topic (ADR-0027)', async () => {
+  const calls = []
+  const agent = { respond: async (args) => {
+    calls.push(args)
+    const m = /个性化主题：([^。\n]+)/.exec(args.text)
+    const topic = m ? m[1] : ''
+    const items = [
+      { title: `${topic || '公共'}头条`, summary: 's', source: 'src', url: 'https://x.com' },
+      { title: '条目B', summary: 's2', source: 'src2', url: 'https://y.com' },
+      { title: '条目C', summary: 's3', source: 'src3', url: 'https://z.com' },
+    ]
+    return { text: JSON.stringify({ focus: `关注${topic}`, items }) }
+  } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1' } })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx-u1', ilinkUserId: 'u1' })
+    store.subscribe('每日早报', 'u1')
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+    await scheduler.sweep()
+    // 生成次数 = 2（AI 一次、芯片一次），没有公共版调用（u1 是唯一订阅者且已设主题）
+    assert.equal(calls.length, 2)
+    const aiCall = calls.find((c) => c.userId === 'task-global-每日早报-u1-AI')
+    const chipCall = calls.find((c) => c.userId === 'task-global-每日早报-u1-芯片')
+    assert.ok(aiCall && chipCall, '两个主题应各自用独立的合成会话 id 生成')
+    assert.match(aiCall.text, /个性化主题：AI/)
+    assert.doesNotMatch(aiCall.text, /个性化主题：芯片/)
+    assert.match(chipCall.text, /个性化主题：芯片/)
+    assert.doesNotMatch(chipCall.text, /个性化主题：AI/)
+
+    // 入库：2 份不同 id 的报告，各自维度隔离
+    const aiReps = reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' })
+    const chipReps = reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '芯片' })
+    assert.equal(aiReps.length, 1)
+    assert.equal(chipReps.length, 1)
+    assert.notEqual(aiReps[0].id, chipReps[0].id)
+    assert.equal(reportStore.getReport(aiReps[0].id).items[0].title, 'AI头条')
+    assert.equal(reportStore.getReport(chipReps[0].id).items[0].title, '芯片头条')
+
+    // 推送：用户收到 2 条独立消息（各自一图一文的文案），不是合并成一条
+    assert.equal(sent.length, 2)
+    const texts = sent.map((m) => m.text)
+    assert.ok(texts.some((t) => /当前主题：AI/.test(t)))
+    assert.ok(texts.some((t) => /当前主题：芯片/.test(t)))
+    const urls = texts.map((t) => (/https:\/\/reports\.local\/(rp-[^\n]+)/.exec(t) || [])[1])
+    assert.equal(new Set(urls).size, 2) // 两份报告链接不同
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 一个主题生成失败不该连累同一用户的其他主题（各自独立降级）。
+test('one topic failing does not block another topic for the same user (ADR-0027)', async () => {
+  const agent = { respond: async (args) => {
+    if (/个性化主题：AI/.test(args.text)) throw new Error('502 Bad Gateway')
+    const items = [{ title: '芯片头条', summary: 's', source: 'src', url: 'https://x.com' }, { title: 'B', summary: '' }, { title: 'C', summary: '' }]
+    return { text: JSON.stringify({ focus: '关注', items }) }
+  } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1' } })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx-u1', ilinkUserId: 'u1' })
+    store.subscribe('每日早报', 'u1')
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+    await scheduler.sweep()
+    // 两条都推送了：AI 是失败话术，芯片是正常海报文案。芯片成功 → 整任务当轮结算
+    // （不会因 AI 那一路失败而把已经成功的芯片也拖进重试循环）。
+    assert.equal(sent.length, 2)
+    assert.ok(store.getTask('global-每日早报').lastRunAt > 0)
+    assert.ok(sent.some((m) => /今天不再重试|系统会自动重试/.test(m.text)))
+    assert.ok(sent.some((m) => /已送达/.test(m.text)))
+    assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '芯片' }).length, 1)
+    assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' }).length, 0)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }

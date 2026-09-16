@@ -120,6 +120,9 @@ test('update/list report topics are per-user and gated on subscription', async (
     // u1 设置主题，u2 看不到
     const ok = await call(tools.updateReportTopics, { name: '每日早报', topics: ['AI', '芯片'] }, ctx('u1'))
     assert.match(ok, /AI、芯片/)
+    // ADR-0027：多主题必须如实告知"各自独立推送"，不能让用户以为只是分区展示
+    assert.match(ok, /2 条/)
+    assert.match(ok, /各自独立生成一份、各发一条/)
     const mine = await call(tools.listReportTopics, {}, ctx('u1'))
     assert.match(mine, /每日早报：AI、芯片/)
     const other = await call(tools.listReportTopics, {}, ctx('u2'))
@@ -128,15 +131,72 @@ test('update/list report topics are per-user and gated on subscription', async (
     const cleared = await call(tools.updateReportTopics, { name: '每日早报', topics: [] }, ctx('u1'))
     assert.match(cleared, /清除/)
     assert.equal(store.getReportTopics('每日早报', 'u1').length, 0)
+    // 单主题不需要"多条推送"提醒（只有 1 条，无歧义）——顺带用它把 u1 设回单主题，
+    // 给下面 get_daily_report 优先个性化版的断言用
+    const single = await call(tools.updateReportTopics, { name: '每日早报', topics: ['AI'] }, ctx('u1'))
+    assert.doesNotMatch(single, /各自独立生成一份/)
     // get_daily_report 优先个性化版（u1 有主题报告时返回它而非公共版）
-    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI'] })
     reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now() - 1000, items: [{ title: '公共条', summary: 's' }] })
-    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), userId: 'u1', items: [{ title: '我的个性化条', summary: 's' }] })
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), userId: 'u1', topic: 'AI', items: [{ title: '我的个性化条', summary: 's' }] })
     const out = await call(tools.getDailyReport, {}, ctx('u1'))
     assert.match(out, /我的个性化条/)
     assert.doesNotMatch(out, /公共条/)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true })
+  }
+})
+
+// ADR-0027：订阅多个主题时当天有多份独立报告；get_daily_report/resend_daily_report
+// 默认覆盖全部主题，指定 topic 时只处理那一份。
+test('get_daily_report / resend_daily_report cover all of a user\'s topic reports by default, or just one via topic (ADR-0027)', async () => {
+  const file = path.join(os.tmpdir(), `tk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const repFile = file + '.rep.db'
+  const posterFile = path.join(os.tmpdir(), `poster-${Date.now()}.png`)
+  const store = new TaskStore({ file })
+  const reportStore = new ReportStore({ file: repFile })
+  const sent = { images: [], texts: [] }
+  const provider = { sendImage: async (a) => { sent.images.push(a) }, sendText: async (a) => { sent.texts.push(a) } }
+  const reportUrl = (id) => `https://h.example/reports/${id}`
+  const tools = taskTools({ taskStore: store, reportStore, provider, reportUrl })
+  const channel = { providerBotId: 'bot1', toProviderUserId: 'u1', contextToken: 'tok' }
+  const ctx = (userId = 'u1') => ({ context: { userId, channel } })
+  try {
+    fs.writeFileSync(posterFile, Buffer.from('fake-png-bytes'))
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    store.subscribe('每日早报', 'u1')
+    store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), userId: 'u1', topic: 'AI', posterPath: posterFile, items: [{ title: 'AI条', summary: 's' }] })
+    reportStore.saveReport({ taskId: 'global-每日早报', name: '每日早报', runAt: Date.now(), userId: 'u1', topic: '芯片', items: [{ title: '芯片条', summary: 's' }] })
+
+    // 不指定 topic：get_daily_report 把两份都列出来
+    const both = await call(tools.getDailyReport, {}, ctx('u1'))
+    assert.match(both, /AI条/)
+    assert.match(both, /芯片条/)
+    assert.match(both, /（AI）/)
+    assert.match(both, /（芯片）/)
+
+    // 指定 topic：只返回那一份
+    const onlyChip = await call(tools.getDailyReport, { topic: '芯片' }, ctx('u1'))
+    assert.match(onlyChip, /芯片条/)
+    assert.doesNotMatch(onlyChip, /AI条/)
+
+    // 不指定 topic：resend 把两份都重发（各自一图一文/一文）
+    const out = await call(tools.resendDailyReport, {}, ctx('u1'))
+    assert.match(out, /已重新发送 2 份/)
+    assert.equal(sent.images.length, 1) // 只有 AI 那份存了海报
+    assert.equal(sent.texts.length, 2)
+    assert.ok(sent.texts.some((t) => /当前主题：AI/.test(t.text)))
+    assert.ok(sent.texts.some((t) => /当前主题：芯片/.test(t.text)))
+
+    // 指定 topic：只重发那一份
+    sent.images.length = 0; sent.texts.length = 0
+    const outOne = await call(tools.resendDailyReport, { topic: 'AI' }, ctx('u1'))
+    assert.match(outOne, /已重新发送.*每日早报（图\+说明）/)
+    assert.equal(sent.images.length, 1)
+    assert.equal(sent.texts.length, 1)
+    assert.match(sent.texts[0].text, /当前主题：AI/)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(repFile, { force: true }); fs.rmSync(posterFile, { force: true })
   }
 })
 

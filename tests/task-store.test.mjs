@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { TaskStore } from '../src/services/task-store.mjs'
+import { TaskStore, MAX_REPORT_TOPICS } from '../src/services/task-store.mjs'
 
 function makeStore() {
   const file = path.join(os.tmpdir(), `tsk-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
@@ -173,6 +173,22 @@ test('report topics are per-user isolated and require subscription', () => {
     store.setReportTopics({ globalName: '每日早报', userId: 'u2', topics: ['机器人'] })
     assert.deepEqual(store.reportTopicsByTask('每日早报'), { u1: ['AI'], u2: ['机器人'] })
     assert.deepEqual(store.listReportTopics('u1'), [{ taskName: '每日早报', topics: ['AI'] }])
+  } finally {
+    store?.close?.(); fs.rmSync(file, { force: true })
+  }
+})
+
+// ADR-0027：每个主题当天都独立出一份海报+推送，主题数 = 每天推送条数，上限
+// 不能太宽——曾经代码上限 10 与工具文案承诺的"1-5 个"不一致，这里订正并锁死。
+test('report topics are capped at MAX_REPORT_TOPICS (ADR-0027: each topic = one daily push)', () => {
+  const { file, store } = makeStore()
+  try {
+    store.loadGlobalTasks([{ name: '每日早报', schedule: 'daily@08:00', instruction: 'x', kind: 'report' }])
+    store.subscribe('每日早报', 'u1')
+    const many = ['AI', '芯片', '新能源', '机器人', '元宇宙', '生物科技', '量子计算']
+    const cleaned = store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: many })
+    assert.equal(cleaned.length, MAX_REPORT_TOPICS)
+    assert.deepEqual(cleaned, many.slice(0, MAX_REPORT_TOPICS))
   } finally {
     store?.close?.(); fs.rmSync(file, { force: true })
   }

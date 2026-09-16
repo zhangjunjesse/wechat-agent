@@ -128,6 +128,10 @@ export function renderReportPage(report) {
   const p = beijingParts(report.runAt)
   const date = `${p.year}年${p.month}月${p.day}日`
   const coverHtml = report.coverPath ? `<img class="cover" src="cover" alt="封面">` : ''
+  // ADR-0027：同一天可能有多个主题各自一份报告，各自独立 URL；打开链接时必须
+  // 能一眼看出"这是哪个主题的那一份"，否则用户历史消息里攒了好几个链接会分不清。
+  const topicBadge = report.topic ? `<span class="topic-badge">${esc(report.topic)}</span>` : ''
+  const titleSuffix = report.topic ? `（${esc(report.topic)}）` : ''
   const itemsHtml = report.items.map((it, i) => `
         <article class="item">
           <div class="no">${String(i + 1).padStart(2, '0')}</div>
@@ -141,7 +145,7 @@ export function renderReportPage(report) {
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>${esc(report.name)} · ${date}</title>
+<title>${esc(report.name)}${titleSuffix} · ${date}</title>
 <style>
 *{box-sizing:border-box}
 :root{--ink:#101828;--muted:#667085;--line:#eaecf0;--brand:#3b5bdb;--brand-d:#2c4099;--bg:#f4f6fb;--card:#fff}
@@ -152,6 +156,7 @@ body{font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","M
 .brand{display:flex;align-items:center;gap:10px;font-weight:760;font-size:16px}
 .logo{width:34px;height:34px;border-radius:11px;background:linear-gradient(145deg,#5b78f0,#3350c4);display:grid;place-items:center;color:#fff;font-size:16px}
 .date{color:var(--muted);font-size:13px;white-space:nowrap}
+.topic-badge{display:inline-block;margin-left:2px;padding:2px 10px;border-radius:20px;background:#eef2ff;color:var(--brand-d);font-size:12px;font-weight:700;vertical-align:middle}
 .cover{width:100%;border-radius:18px;display:block;margin:0 0 18px;box-shadow:0 14px 40px #1a2a5a14}
 h1{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:2px 0 6px}
 .sub{color:var(--muted);font-size:14px;margin:0 0 20px}
@@ -165,10 +170,10 @@ h1{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:2px 0 6px}
 .meta a{color:var(--brand);text-decoration:none;font-weight:650}
 .foot{color:#98a2b3;text-align:center;font-size:12.5px;margin-top:30px}
 </style></head><body><div class="wrap">
-<header class="head"><div class="brand"><span class="logo">📰</span>${esc(report.name)}</div><div class="date">${date}</div></header>
+<header class="head"><div class="brand"><span class="logo">📰</span>${esc(report.name)}${topicBadge}</div><div class="date">${date}</div></header>
 ${coverHtml}
 <h1>${esc(report.name)}</h1>
-<p class="sub">每日精选 · ${date}</p>
+<p class="sub">${report.topic ? `${esc(report.topic)} 专题 · ` : ''}每日精选 · ${date}</p>
 ${focusHtml}
 ${itemsHtml}
 <div class="foot">由微信个人助手定时生成 · 内容来源见各条目原文链接</div>

@@ -3,6 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { parseSchedule } from './schedule.mjs'
 
+/** 单用户对单任务的最大主题订阅数（ADR-0027）。每个主题当天各自出一份独立
+ * 海报+推送，这个数就是用户每天收到的推送条数上限，务必与
+ * `update_report_topics` 工具描述里的"1-5 个"保持一致。 */
+export const MAX_REPORT_TOPICS = 5
+
 /** 定时任务存储（SQLite，见 DESIGN-timed-tasks.md）。
  *
  * 两类任务：
@@ -146,12 +151,16 @@ export class TaskStore {
 
   // ---- per-user report topics（ADR-0019：主题订阅，严格按用户隔离）----
 
-  /** 设置用户对某任务的关注主题（替代式：传空数组 = 清除个性化，回到公共版）。 */
+  /** 设置用户对某任务的关注主题（替代式：传空数组 = 清除个性化，回到公共版）。
+   * 上限 5 个（MAX_REPORT_TOPICS）：ADR-0027 起每个主题当天各自出一份独立的
+   * 海报+推送，主题数直接等于用户每天收到的推送条数——上限如果还是老的 10，
+   * 用户设满就是每天 10 张图轰炸，体验和成本都不可接受；5 与 `update_report_topics`
+   * 工具描述早就承诺的"1-5 个"对齐（此前代码上限 10 与文案不符，顺手订正）。 */
   setReportTopics({ globalName, userId, topics = [] }) {
     const task = this.#db.prepare('SELECT scope FROM tasks WHERE scope = ? AND name = ?').get('global', String(globalName))
     if (!task) throw new Error(`公共任务「${globalName}」不存在`)
     if (!this.isSubscribed(globalName, userId)) throw new Error(`你未订阅「${globalName}」，请先订阅再设置主题`)
-    const cleaned = topics.map((t) => String(t).trim()).filter(Boolean).slice(0, 10)
+    const cleaned = topics.map((t) => String(t).trim()).filter(Boolean).slice(0, MAX_REPORT_TOPICS)
     const uid = String(userId)
     this.#db.prepare(`
       INSERT INTO report_topics (user_id, task_name, topics, updated_at)

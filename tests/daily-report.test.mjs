@@ -129,6 +129,15 @@ test('renderReportPage is responsive HTML with escaped content', () => {
   // 无封面时不出 <img class="cover">
   const html2 = renderReportPage({ ...report, coverPath: '' })
   assert.doesNotMatch(html2, /<img class="cover"/)
+  // ADR-0027：主题版报告页要能一眼看出是哪个主题（同一天可能有多个独立链接）
+  const html3 = renderReportPage({ ...report, topic: 'AI' })
+  assert.match(html3, /<title>每日早报（AI）/)
+  assert.match(html3, /topic-badge">AI</)
+  assert.match(html3, /AI 专题/)
+  // 无主题（公共版）不渲染徽标元素（CSS 规则本身始终在 <style> 里，不代表用了它），
+  // 标题也不带括号后缀
+  assert.doesNotMatch(html, /topic-badge">/)
+  assert.doesNotMatch(html, /<title>每日早报（/)
 })
 
 test('renderReportPoster is a text-on-image poster with no raw URLs and no AI image', () => {
