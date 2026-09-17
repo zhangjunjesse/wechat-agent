@@ -66,6 +66,13 @@ export class SessionStore {
         updated_at = excluded.updated_at
     `).run(String(userId), JSON.stringify(transcript), summary, tokenEstimate, Date.now())
   }
+
+  /** 释放底层 SQLite 句柄。与 `WechatLogStore.close()` / `MemoryStore.close()`
+   * 同一个理由：进程内还持有句柄时 Windows 拒绝 unlink（EBUSY），"临时 db 文件
+   * 用完即删"的调用方必须能显式关闭。生产常驻进程不需要调用。可重复调用。 */
+  close() {
+    try { this.#db.close() } catch { /* already closed */ }
+  }
 }
 
 function safeJson(text, fallback) {

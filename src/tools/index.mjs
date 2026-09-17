@@ -13,6 +13,7 @@ import { posterTools } from './poster-tools.mjs'
 import { larkTools } from './lark-tools.mjs'
 import { taskTools } from './task-tools.mjs'
 import { groupTagTools } from './group-tag-tools.mjs'
+import { expertModeTools } from './expert-mode-tools.mjs'
 
 /** Assemble the full tool set for the agent. All tools read userId from run
  * context (ctx.context.userId) so per-user sandboxing and data isolation hold.
@@ -38,11 +39,17 @@ import { groupTagTools } from './group-tag-tools.mjs'
  * VISION_MODEL is configured does image_describe get registered — same
  * "config missing → feature silently absent" pattern as lark/wechat_*.
  *
+ * `expertMode` (optional, ADR-0033) is `{ store, ttlMs, expertModel }`: only when
+ * an expert model is configured does `set_expert_mode` get registered — same
+ * "config missing → feature silently absent" pattern as lark/vision. It is
+ * deliberately NOT passed for the delegation subagent tool set (ADR-0024): a
+ * background task must not flip the user's interactive model out from under him.
+ *
  * `use_skill` is NOT assembled here: it carries the per-user skill catalog in
  * its description and is built per turn by AgentsSdkAgent (ADR-0013).
  * `manage_skill` is only registered when ADMIN_SKILLS=1 (runtime skill
  * management, see ADR-0013). */
-export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, wechatMediaDir, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark, vision = null, groupProfiles = null }) {
+export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogStore, wechatMediaDir, root, issueDownloadLink, provider, taskStore, reportStore, reportUrl = null, lark, vision = null, groupProfiles = null, expertMode = null }) {
   const files = fileTools({ root, issueDownloadLink })
   const code = codeTools()
   const web = webTools({ fetchImpl })
@@ -68,6 +75,11 @@ export function buildTools({ memoryManager, skillRegistry, fetchImpl, wechatLogS
   ]
   // 视觉理解（ADR-0030）：VISION_MODEL 未配置时 vision 为 null，工具压根不存在
   if (image.imageDescribe) tools.push(image.imageDescribe)
+  // 专家模式（ADR-0033）：未配置 EXPERT_MODEL 时 expertMode 为 null，工具不注册
+  if (expertMode?.store) {
+    const expert = expertModeTools({ store: expertMode.store, ttlMs: expertMode.ttlMs, expertModel: expertMode.expertModel })
+    tools.push(expert.setExpertMode)
+  }
   if (process.env.ADMIN_SKILLS === '1') {
     const manage = manageSkillTools({ skillRegistry })
     tools.push(manage.manageSkill)

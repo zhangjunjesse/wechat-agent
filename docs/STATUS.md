@@ -394,6 +394,43 @@
   返回结构化、与图片实际内容（表格列名、红框高亮区域等版面细节）吻合的中文描述——不是
   泛泛而谈，证明模型真的"看"到了图，不只是 HTTP 200。
 
+## 专家模式（ADR-0033，2026-09-17，⚠️ 代码已写但**未跑过测试、未做真实探针**）
+
+- 需求：用户对助手说「切换到专家模式」→ 该用户后续对话改用更强的模型
+  （`EXPERT_MODEL`，默认 `gpt-5.6-sol`），默认 **60 分钟后自动恢复**默认模型
+  （`OPENAI_MODEL`=`deepseek-v4-flash`）。
+- 做法：`ModelRoutingAgent`（`src/llm/model-routing-agent.mjs`）是个**包装 agent**
+  ——持两个 `AgentsSdkAgent`（默认/专家），`respond()` 时按用户状态转发，参数与
+  返回值原样透传。`server.mjs` 用它包住原 `agent` 再注入 `createApp`；
+  **`app.mjs`/`MessageRouter`/`/api/chat` 一行没改**。两个实例共用同一份
+  `sessionOpts`（同一个 sessionStore/memoryStore **实例引用**）→ 切模型时对话
+  历史与长期记忆连续。
+- 触发两条路，写**同一个** `ExpertModeStore`：① 快捷命令**精确匹配**
+  （`切换到专家模式`/`退出专家模式`… 常量表 `EXPERT_ON_PHRASES`/`EXPERT_OFF_PHRASES`），
+  在任何 LLM 调用**之前**拦下，零 token、零延迟、确认文本带具体恢复时刻（北京时间
+  `HH:MM`）；② `set_expert_mode` 工具兜底自然说法，**从下一条消息才生效**（工具在
+  本轮 run 里被调用，模型已定），工具返回文本强制要求模型如实这么转述。
+- 过期是**惰性判定**（`now < expiresAt`），**没有任何定时器**——定时器进程重启即失效
+  且失效方式是"永久停在专家模式"。过期**静默恢复**，不推消息。重复开启 = **刷新**
+  （从当前时刻重算 60 分钟），不叠加。状态落 `data/expert-mode.json`
+  （生产 `/data/expert-mode.json`），`clock` 可注入。
+- **同批修掉的前置缺陷**：`wrapClientForDeepSeek` 原本**无条件**套在 client 上，会给
+  所有带 `tool_calls` 的 assistant 消息强行注入 DeepSeek 专有字段 `reasoning_content`
+  （含占位兜底）。现改为按模型名 gate：新增 `isDeepSeekModel()` + `wrapClientForModel()`，
+  非 DeepSeek 模型拿**原始 client**（请求体零多余字段，`reset` 为 no-op）；
+  `wrapClientForDeepSeek` 签名与行为**一字未动**，原 7 条测试原样保留。
+- 不做：定时任务（日报/周报/digest）与委派子 agent **不受影响**（各自另外构造实例，
+  仍读 `OPENAI_MODEL`；子 agent 工具集里也没有 `set_expert_mode`）；不做按群/按会话
+  切换；不做用量/成本统计与限流（见 ADR 的「遗留风险」）。
+- env：`EXPERT_MODEL`（默认 `gpt-5.6-sol`，**留空则整个特性不启用**）、
+  `EXPERT_MODE_TTL_MINUTES`（默认 60）、`EXPERT_MODE_FILE`。
+- **⚠️ 验证状态（诚实）**：开发会话的执行环境拒绝运行 `node`/`npm`（非交互会话无法
+  应答授权提示），也禁止出网。所以 **`node --test` 一次都没跑过**，
+  **`scripts/probe-expert-model.mjs`（真实网关 + 真实工具调用探针）也没跑过**——
+  `gpt-5.6-sol` 在这套 Agents SDK 栈上能否跑通工具调用、去掉 deepseek 包装后会不会
+  400，**全部未验证**。接手的第一件事就是跑这两样。详见
+  `docs/ADR-0033-expert-mode-per-user-model.md` 与 `docs/_handoff-expert-mode.md`。
+
 ## 会话时间感知（ADR-0015）
 
 - 问题：transcript 无时间戳，模型感知不到"距上次对话多久"，隔天对话生硬接续旧话题。
@@ -448,6 +485,11 @@
 - **日报管道待上线实测**：部署后验证——① 每日早报 08:00 真实触发一轮（agent 执行 +
   微信推送 + 公网页 `/reports/<id>` 可访问）② 封面图经 image-studio 技能的出图效果
   与 sendImage 送达 ③ 连续多天内容去重是否有效。
+- **专家模式（ADR-0033）完全未经验证**：测试没跑过、真实网关探针没跑过、没部署。
+  上线前必须：① `node --test --test-concurrency=1 "tests/*.test.mjs"`；
+  ② `OPENAI_API_KEY=… node scripts/probe-expert-model.mjs`（在生产机上跑，key 从
+  `/opt/wechat-agent/server.env` 取）；③ `server.env` 加 `EXPERT_MODEL` 后
+  **`docker rm + docker run`**（`docker restart` 不会重读 env-file）。
 - L2 技能仓库同步、技能脚本执行器抽象、用户私有技能上传接口为后续工作。
 - bindings 仍是 JSON 文件存储（`data/bindings.json`），未做加密 + 未迁移真实数据库。
 - 语音消息（VOICE 通道）未实现专门发送，音频走文件附件（用户未要求）。

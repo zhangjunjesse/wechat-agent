@@ -7,7 +7,7 @@ import { MemoryExtractor } from './memory-extractor.mjs'
 import { MemoryManager } from './memory-manager.mjs'
 import { buildBaseInstructions, buildDynamicSystem } from './system-prompt.mjs'
 import { buildUseSkillTool } from '../tools/misc-tools.mjs'
-import { wrapClientForDeepSeek } from './deepseek-thinking-client.mjs'
+import { wrapClientForModel } from './deepseek-thinking-client.mjs'
 import { buildGapLine } from './conversation-pace.mjs'
 import { createMemoryComplete } from './memory-complete.mjs'
 import { createSerialQueue } from './serial-queue.mjs'
@@ -29,8 +29,12 @@ export class AgentsSdkAgent {
     // round-trips `reasoning_content` through multi-turn tool calls (see
     // deepseek-thinking-client.mjs); memory/summarize calls keep the raw
     // client so they never inherit the agent loop's reasoning cache.
+    // ADR-0033: the wrap is now gated on the model name. `reasoning_content` is
+    // DeepSeek-proprietary — injecting it into a gpt-5.6-* request (expert mode)
+    // is at best noise and at worst a 400. Non-DeepSeek models get the raw
+    // client and a no-op reset; DeepSeek behavior is byte-for-byte unchanged.
     const rawClient = new OpenAI({ apiKey, baseURL: baseUrl })
-    const { client: modelClient, reset: resetThinking } = wrapClientForDeepSeek(rawClient)
+    const { client: modelClient, reset: resetThinking } = wrapClientForModel(rawClient, model)
     this.#resetThinking = resetThinking
     this.#llm = rawClient
     // 记忆/摘要调用统一关闭思考（理由与实测见 memory-complete.mjs）：既能避免"思考吃掉

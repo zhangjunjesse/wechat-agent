@@ -337,6 +337,13 @@ export class MemoryStore {
       : this.#db.prepare(sql).all(String(userId), String(extra))
     return rows.map(rowToCard)
   }
+
+  /** 释放底层 SQLite 句柄。与 `WechatLogStore.close()` 同一个理由：进程内还持有
+   * 句柄时 Windows 拒绝 unlink（EBUSY），因此"每个用例/每次探针建一个临时 db 文件
+   * 再删掉"的调用方必须能显式关闭。生产常驻进程不需要调用。可重复调用。 */
+  close() {
+    try { this.#db.close() } catch { /* already closed */ }
+  }
 }
 
 function rowToCard(row) {

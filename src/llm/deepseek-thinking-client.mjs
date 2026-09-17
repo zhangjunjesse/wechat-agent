@@ -15,7 +15,11 @@ import fs from 'node:fs'
  * 由调用方控制：一次 agent run 开头 reset()，run 内多轮工具调用正确回传，不
  * 污染 run 之外的内存抽取/摘要等独立调用（那些用原始 client）。
  *
- * 仅处理非流式（Agents SDK 默认 getResponse 非流式；本仓库未开 stream）。 */
+ * 仅处理非流式（Agents SDK 默认 getResponse 非流式；本仓库未开 stream）。
+ *
+ * ⚠️ 直接调用本函数 = **无条件包装**。按模型名决定包不包，用下面的
+ * `wrapClientForModel`——`reasoning_content` 是 DeepSeek 专有字段，给非 DeepSeek
+ * 模型（如专家模式的 gpt-5.6-sol，ADR-0033）注入它属于往请求里塞垃圾。 */
 export function wrapClientForDeepSeek(client) {
   const rc = [] // reasoning_content cache, ordered by assistant-message occurrence
   const completions = client.chat.completions
@@ -90,4 +94,26 @@ export function wrapClientForDeepSeek(client) {
   }
 
   return { client, reset: () => { rc.length = 0 } }
+}
+
+/** 模型名是否属于 DeepSeek 系（`deepseek-flash` / `deepseek-v4-flash` /
+ * `deepseek-v4-pro` / 网关上带前缀的 `xxx/deepseek-chat` 都命中）。 */
+export function isDeepSeekModel(model) {
+  return /deepseek/i.test(String(model || ''))
+}
+
+/** 按模型名 gate 的包装入口（ADR-0033）。
+ *
+ * 为什么必须 gate：`wrapClientForDeepSeek` 会给**每一条**带 `tool_calls` 的
+ * assistant 消息强行补上 `reasoning_content`（缺真值时还补占位字符串）。这个字段
+ * 是 DeepSeek 思考模式的专有协议要求，对 OpenAI/Anthropic 系模型是纯粹多余的
+ * 未知字段——轻则被网关忽略，重则 400。此前它被无条件套在 client 上，是"整套栈
+ * 只跑过 DeepSeek"这个历史事实的产物，不是有意的设计。
+ *
+ * 非 DeepSeek 模型拿到的是**原始 client**（不是"包装了但不注入"）：请求体里不会
+ * 多出任何东西，行为与没有这一层完全一致；`reset` 退化成 no-op，调用方
+ * （`AgentsSdkAgent`）不需要知道自己跑的是哪种模型。 */
+export function wrapClientForModel(client, model) {
+  if (!isDeepSeekModel(model)) return { client, reset: () => {}, wrapped: false }
+  return { ...wrapClientForDeepSeek(client), wrapped: true }
 }

@@ -31,6 +31,8 @@ import { SubagentRunner } from './services/subagent-runner.mjs'
 import { VisionClient } from './services/vision-client.mjs'
 import { GroupProfileStore } from './services/group-profile-store.mjs'
 import { WechatDigestRunner } from './services/wechat-digest-runner.mjs'
+import { ExpertModeStore } from './services/expert-mode-store.mjs'
+import { ModelRoutingAgent } from './llm/model-routing-agent.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
 const provider = new ILinkProvider({ userFilesRoot })
@@ -126,10 +128,34 @@ const vision = visionModel && process.env.OPENAI_API_KEY
   : null
 if (!vision) console.warn('vision disabled: set VISION_MODEL to enable image_describe (ADR-0030)')
 
-const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark, vision, groupProfiles })
+// 专家模式（ADR-0033）：per-user 临时切到更强的模型，默认 60 分钟后惰性过期。
+// 状态存储必须在 buildTools 之前建好——`set_expert_mode` 工具（兜底路径）与
+// ModelRoutingAgent 的快捷命令（主路径）写的是**同一个**实例，它是"这个用户
+// 当前在不在专家模式"这件事的唯一 owner。
+// 路径注意：容器 cwd 是 `/`，所以相对路径 `data/expert-mode.json` 在生产解析到
+// `/data/expert-mode.json`（与 TASKS_FILE 等同一处理方式，该目录已挂载持久卷）。
+const expertModel = process.env.EXPERT_MODEL ?? 'gpt-5.6-sol'
+const expertModeTtlMs = Math.max(1, Number(process.env.EXPERT_MODE_TTL_MINUTES || 60)) * 60_000
+const expertModeStore = expertModel ? new ExpertModeStore({ file: process.env.EXPERT_MODE_FILE || 'data/expert-mode.json' }) : null
+if (!expertModeStore) console.warn('expert mode disabled: set EXPERT_MODEL to enable (ADR-0033)')
+
+const tools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore, reportStore, reportUrl, lark, vision, groupProfiles, expertMode: expertModeStore ? { store: expertModeStore, ttlMs: expertModeTtlMs, expertModel } : null })
 
 const sessionOpts = { sessionStore, memoryStore, tokenBudget: Number(process.env.SESSION_TOKEN_BUDGET || 128_000), threshold: Number(process.env.SESSION_FOLD_THRESHOLD || 0.8), keepTurns: Number(process.env.SESSION_KEEP_TURNS || 30) }
-const agent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
+const defaultAgent = process.env.OPENAI_API_KEY ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry }) : undefined
+// 专家模式的第二个实例（ADR-0033）：与默认实例**共用同一份 `sessionOpts`**，也就
+// 是同一个 sessionStore/memoryStore 实例引用——模型换了，对话历史与长期记忆必须
+// 连续，否则用户切一次模式就像换了个助手。分开的只有模型（和 AgentsSdkAgent
+// 每实例自带的那条串行队列，隔离手法同 ADR-0024/ADR-0028）。
+const expertAgent = defaultAgent && expertModel
+  ? new AgentsSdkAgent({ model: expertModel, baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools, skillRegistry })
+  : null
+// 包装器而不是去改 MessageRouter 或 /api/chat：三个调用方（私聊路由、网页
+// /api/chat、群命令 watcher）看到的仍然只是"一个有 respond() 的东西"，一行都不用改。
+// 未配置专家模型时 ModelRoutingAgent 纯透传，服务行为与未加此功能完全一致。
+const agent = defaultAgent
+  ? new ModelRoutingAgent({ defaultAgent, expertAgent, store: expertModeStore, ttlMs: expertModeTtlMs })
+  : undefined
 
 // 任务委派（DESIGN-task-delegation.md / ADR-0024）：
 // 主 agent 只决策与秒回；长任务交给后台子 agent（独立实例 + 独立 thinking 缓存，

@@ -136,6 +136,8 @@ test('subagent tool set is restricted: can deliver/progress, cannot delegate aga
     assert.ok(!names.includes('subscribe_task'))
     assert.ok(!names.includes('get_daily_report'))
     assert.ok(!names.includes('resend_daily_report')) // ADR-0026: 同一开关，子 agent 不该拿到
+    // ADR-0033: 后台任务不得把用户交互对话的模型从底下换掉
+    assert.ok(!names.includes('set_expert_mode'))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

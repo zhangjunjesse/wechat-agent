@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { wrapClientForDeepSeek } from '../src/llm/deepseek-thinking-client.mjs'
+import { wrapClientForDeepSeek, wrapClientForModel, isDeepSeekModel } from '../src/llm/deepseek-thinking-client.mjs'
 
 /** Build a fake OpenAI client whose chat.completions.create records the
  * request body and returns a controllable chat completion response. */
@@ -159,4 +159,57 @@ test('concurrent cache resets no longer cause a 400: tool_calls always end up wi
   const assistant = a2Call.body.messages.find((m) => m.role === 'assistant')
   assert.ok(typeof assistant.reasoning_content === 'string' && assistant.reasoning_content.length > 0, 'tool_calls 消息必须带上 reasoning_content（兜底防 400）')
   assert.ok(assistant.tool_calls, '不得破坏 tool_calls')
+})
+
+/* ---- 按模型名 gate（ADR-0033） -------------------------------------------- */
+
+test('isDeepSeekModel 只认 DeepSeek 系模型名', () => {
+  for (const m of ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro', 'DeepSeek-Chat', 'openrouter/deepseek-chat']) {
+    assert.equal(isDeepSeekModel(m), true, `${m} 应被认作 DeepSeek`)
+  }
+  for (const m of ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra', 'claude-opus-5', 'claude-fable-5', '', null, undefined]) {
+    assert.equal(isDeepSeekModel(m), false, `${JSON.stringify(m)} 不应被认作 DeepSeek`)
+  }
+})
+
+test('非 DeepSeek 模型：请求体里不含 reasoning_content（拿到的就是原始 client）', async () => {
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning('R1') })
+  const { client: gated, reset, wrapped } = wrapClientForModel(client, 'gpt-5.6-sol')
+  assert.equal(wrapped, false)
+  assert.equal(gated, client, '非 DeepSeek 模型应拿到原始 client 本身，不是"包装但不注入"')
+  reset() // no-op，不得抛
+
+  const tc = { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' } }] }
+  await gated.chat.completions.create({ messages: [{ role: 'user', content: 'u1' }] })
+  // 第二轮：上一轮响应带了 reasoning_content，且本轮有 tool_calls 消息——
+  // 这正是 DeepSeek 分支会注入的场景，非 DeepSeek 分支必须一个字节都不加。
+  await gated.chat.completions.create({ messages: [{ role: 'user', content: 'u1' }, tc, { role: 'tool', tool_call_id: 'c1', content: 'r' }] })
+  reset()
+
+  for (const call of calls) {
+    for (const m of call.body.messages) {
+      assert.equal('reasoning_content' in m, false, `非 DeepSeek 请求体不得出现 reasoning_content：${JSON.stringify(m)}`)
+    }
+  }
+})
+
+test('DeepSeek 模型：wrapClientForModel 与直接 wrapClientForDeepSeek 行为一致（现有行为零变化）', async () => {
+  const { client, calls } = fakeClient({ respond: () => completionWithReasoning('R1') })
+  const { client: gated, reset, wrapped } = wrapClientForModel(client, 'deepseek-v4-flash')
+  assert.equal(wrapped, true)
+  reset()
+  const tc = { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' } }] }
+  await gated.chat.completions.create({ messages: [{ role: 'user', content: 'u1' }] })
+  await gated.chat.completions.create({ messages: [{ role: 'user', content: 'u1' }, tc, { role: 'tool', tool_call_id: 'c1', content: 'r' }] })
+  const sent = calls[1].body.messages.find((m) => m.role === 'assistant')
+  assert.equal(sent.reasoning_content, 'R1')
+  assert.ok(sent.tool_calls)
+})
+
+test('wrapClientForModel 的 reset 对非 DeepSeek 是 no-op 且不影响原 client', async () => {
+  const { client } = fakeClient({ respond: () => completionWithReasoning('R') })
+  const before = client.chat.completions.create
+  const { reset } = wrapClientForModel(client, 'claude-opus-5')
+  assert.equal(client.chat.completions.create, before, '非 DeepSeek 分支不得改写 client.chat.completions.create')
+  assert.doesNotThrow(() => reset())
 })
