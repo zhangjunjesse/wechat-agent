@@ -65,7 +65,10 @@ docker run -d --name wechat-agent --restart unless-stopped \
 ```
 
 启动成功标志（日志）：
-- `global tasks loaded: 每日早报`
+- `global tasks loaded: …`——逗号分隔列出全部公共任务名，**顺序不保证**
+  （2026-09-17 生产实测输出为 `微信周报, 微信日报, 每日资讯`）。应与
+  `deploy/global-tasks.json` 的条目一一对应；「每日早报」已于 2026-09-17 改名为
+  「每日资讯」（ADR-0031），旧名不应再出现。
 - `wechat-agent listening on http://127.0.0.1:8789`
 
 ## 2. 重启后立即验证（若已过北京 08:00，首轮 sweep 会立即触发今天的日报）

@@ -72,6 +72,8 @@
 
 ## 遗留（诚实边界）
 
-- 预置公共任务当前仅"每日早报"（`deploy/global-tasks.json`），管理员编辑文件后重启生效；
-  后续可加 manage 工具热更新（未做）。
+- 预置公共任务以 `deploy/global-tasks.json` 为唯一权威（本记录不再枚举，避免重复来源
+  漂移；截至 2026-09-17 为「每日资讯」「微信日报」「微信周报」——改名见 ADR-0031，
+  后两者见 DESIGN-wechat-digest.md）。管理员编辑文件后重启生效；后续可加 manage 工具
+  热更新（未做）。
 - iLink 主动推送的 contextToken 有效期行为待真实会话长期验证。
