@@ -252,7 +252,7 @@ export class TaskScheduler {
     const now = this.#now()
     const windowDays = digestWindowDays(task.schedule)
     const subscribers = task.subscribers || []
-    const unitKey = (u) => `${u.userId} ${u.topic}`
+    const unitKey = (u) => `${u.userId}\u0000${u.topic}`
     const allUnits = subscribers.map((userId) => ({ userId, topic: '' })) // 单元 = 一个订阅者
     const pendingBefore = Array.isArray(task.retryUnits) ? task.retryUnits : []
     const pendingByKey = new Map(pendingBefore.map((u) => [unitKey(u), u]))

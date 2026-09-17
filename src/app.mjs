@@ -10,10 +10,19 @@ import { renderPage } from './ui-page.mjs'
 import { renderReportPage } from './services/daily-report.mjs'
 import { renderDigestPage } from './services/wechat-digest.mjs'
 
-/** 注册核验成功后自动订阅的公共任务（ADR-0031）。名字必须与
- * `deploy/global-tasks.json` 里的 `name` 完全一致；对不上时 `subscribe` 抛
- * 「公共任务「X」不存在」，由 `buildOnVerified` 吞掉并上报，不拦核验本身。 */
-export const DEFAULT_SUBSCRIPTIONS = ['每日资讯']
+/** 注册核验成功后自动订阅的公共任务（ADR-0031，2026-09-17 变更：从只有「每日
+ * 资讯」扩到「所有人默认订阅微信日报和微信周报」，产品需求直接指示）。名字必须
+ * 与 `deploy/global-tasks.json` 里的 `name` 完全一致；对不上时 `subscribe` 抛
+ * 「公共任务「X」不存在」，由 `buildOnVerified` 吞掉并上报，不拦核验本身。
+ *
+ * 这个列表只对**新用户**（核验通过那一刻）生效——它是"在某个一次性时刻施加
+ * 一次"的默认值，不是"系统持续确保所有人都订阅"的强制状态。**存量**用户由
+ * `scripts/backfill-default-subscriptions.mjs` 一次性回填，且该脚本刻意不挂在
+ * 服务启动路径上：任何形式的"每次启动都把已核验用户订阅补齐"，都会让用户的
+ * 退订在下次重启后被悄悄撤销——退订功能等于永久失效。默认订阅之后，用户自己
+ * 的订阅/退订状态就是唯一权威，系统不会再覆盖它。详见 ADR-0031 2026-09-17 变更
+ * 记录。 */
+export const DEFAULT_SUBSCRIPTIONS = ['每日资讯', '微信日报', '微信周报']
 
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null, taskStore = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onVerifiedError = (error, name) => console.warn(`default subscription failed${name ? ` (${name})` : ''}: ${error?.message || error}`) }) {
   const owned = []

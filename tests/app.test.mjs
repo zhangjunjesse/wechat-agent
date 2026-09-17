@@ -169,7 +169,14 @@ function subSetup(t) {
     taskStore.close(); contextTokens.close()
     for (const f of [taskFile, profFile, ctxFile]) fs.rmSync(f, { force: true })
   })
-  taskStore.loadGlobalTasks([{ name: '每日资讯', schedule: 'daily@08:00', kind: 'report', instruction: 'x' }])
+  // 三条都要建出来：DEFAULT_SUBSCRIPTIONS（ADR-0031 2026-09-17 变更）现在默认订阅
+  // 全部三条公共任务，缺了任何一条，onVerified 对它的 subscribe 调用都会因为
+  // 「公共任务「X」不存在」被 buildOnVerified 吞掉，污染下面对 errors/欢迎语的断言。
+  taskStore.loadGlobalTasks([
+    { name: '每日资讯', schedule: 'daily@08:00', kind: 'report', instruction: 'x' },
+    { name: '微信日报', schedule: 'daily@21:30', kind: 'wechat-digest', instruction: 'x' },
+    { name: '微信周报', schedule: 'weekly@7@20:00', kind: 'wechat-digest', instruction: 'x' },
+  ])
   return { taskStore, profileStore, contextTokens, provider, sent, errors }
 }
 
@@ -188,6 +195,9 @@ test('onVerified subscribes with the STABLE tenant key (ilinkUserId), not the br
   assert.deepEqual(task.subscribers, [ILINK_ID])            // ← 与 subscribe_task / 调度器同一命名空间
   assert.equal(task.subscribers.includes(BROWSER_ID), false)
   assert.equal(s.taskStore.isSubscribed('每日资讯', ILINK_ID), true)
+  // 「所有人默认订阅微信日报和微信周报」：新用户核验通过即三条全订上
+  assert.equal(s.taskStore.isSubscribed('微信日报', ILINK_ID), true)
+  assert.equal(s.taskStore.isSubscribed('微信周报', ILINK_ID), true)
   assert.deepEqual(s.errors, [])
 })
 
@@ -204,7 +214,7 @@ test('onVerified sends a welcome message only when that channel has a usable ses
   assert.equal(s.sent.length, 1)
   assert.equal(s.sent[0].toProviderUserId, ILINK_ID)
   assert.equal(s.sent[0].contextToken, 'tok-1')
-  assert.match(s.sent[0].text, /已默认为你订阅「每日资讯」/)
+  assert.match(s.sent[0].text, /已默认为你订阅「每日资讯」、「微信日报」、「微信周报」/)
   assert.match(s.sent[0].text, /退订每日资讯/) // 必须告诉用户怎么退
 })
 
@@ -218,6 +228,8 @@ test('onVerified without a cached contextToken still subscribes, silently', asyn
   await onVerified({ userId: 'u_browser2', profile })
 
   assert.deepEqual(s.taskStore.getTask('global-每日资讯').subscribers, [ILINK_ID])
+  assert.equal(s.taskStore.isSubscribed('微信日报', ILINK_ID), true)
+  assert.equal(s.taskStore.isSubscribed('微信周报', ILINK_ID), true)
   assert.equal(s.sent.length, 0)
   assert.deepEqual(s.errors, [])
   // provider 完全缺失时也一样
@@ -277,7 +289,7 @@ test('buildOnVerified is inert without a taskStore or with an empty subscription
   assert.equal(buildOnVerified({ taskStore: null }), null)
   assert.equal(buildOnVerified({ taskStore: {}, defaultSubscriptions: [] }), null)
   assert.equal(buildOnVerified({ taskStore: {}, defaultSubscriptions: ['  '] }), null)
-  assert.deepEqual(DEFAULT_SUBSCRIPTIONS, ['每日资讯']) // 必须与 deploy/global-tasks.json 的 name 一致
+  assert.deepEqual(DEFAULT_SUBSCRIPTIONS, ['每日资讯', '微信日报', '微信周报']) // 必须与 deploy/global-tasks.json 的 name 一致
 })
 
 test('GET /lark/auth/callback exchanges code when lark configured, 404 otherwise (ADR-0021)', async (t) => {
