@@ -139,7 +139,7 @@ export function wechatTools({ wechatLogStore, root, mediaDir, fetchMedia = fetch
           const f = await fetchMedia({ attachment: a, mediaDir, userId, root })
           fetched++
           const thumbNote = a.thumb
-            ? '（⚠️ 现在同步到的还只是缩略图，很小很糊，基本看不出内容——建议让对方在微信里点开这张图看一眼，原图同步过来后再重新取一次）'
+            ? '（⚠️ 现在同步到的还只是缩略图，很小很糊，基本看不出内容。别拿它去 image_describe，模型看不清只会编。原图由采集端补齐，过一会儿再取一次可能就有了；如果一直没有，就如实告诉用户这张图没同步到原件，不要猜图里是什么）'
             : ''
           out.push(`已取回${labelOf(f.kind)}：${f.path}（${f.name}，${formatSize(f.size)}）${thumbNote}`)
         } catch (e) {

@@ -154,7 +154,7 @@ export class GroupCommandWatcher {
       attachmentNote = attach.available === false
         ? `📎 这条消息带了一个${label}附件${attach.filename ? `「${attach.filename}」` : ''}，但还没同步完成，暂时取不到${attach.reason ? `（${attach.reason}）` : ''}。`
         : `📎 这条消息带了一个${label}附件${attach.filename ? `「${attach.filename}」` : ''}，如需查看/处理可用 wechat_fetch_chat_file 取回（chat=「${chatLabel}」，time=${beijingDateTimeStr(Number(row.ts) * 1000)}）。` +
-          (attach.thumb ? '（⚠️ 目前只同步到缩略图，很小很糊，取回后先别急着 image_describe，可能看不出内容，建议提示用户在微信里点开这张图再等一下）' : '')
+          (attach.thumb ? '（⚠️ 目前只同步到缩略图，很小很糊，取回后别直接 image_describe——看不清内容，模型只会编。原图由采集端自动补齐，过一会儿再取可能就有了）' : '')
     } else if (attach?.kind === 'link') {
       attachmentNote = `🔗 这条消息带了一个分享链接：${[attach.title, attach.url].filter(Boolean).join(' ')}`
     }
