@@ -209,6 +209,9 @@ function defaultAmbiguousNicknameHandler({ nickname, memberWxids }) {
  *   image/file/video/voice/sticker → media_id/ext/size/filename/available/reason
  *   （sticker 有的只有 url 没有 media_id）；link → title/url；
  *   quote → reply/quoted_name/quoted_text；merged → title/preview。
+ * `thumb`（ADR-0034）：图片类附件当前是否只同步到了缩略图（210×118、几 KB，
+ * 视觉模型看不出内容）——采集端原图晚到时会自动补齐，这里只负责如实透传，
+ * 不做补全。
  * 白名单透传：未知字段丢弃、非 JSON/缺 kind 一律返回 null（调用方回退到
  * MSG_TYPE_LABELS 占位符），不把原始 JSON 泄给模型层。 */
 export function parseAttachment(raw) {
@@ -229,6 +232,7 @@ export function parseAttachment(raw) {
   if (a.quoted_name != null) out.quotedName = String(a.quoted_name)
   if (a.quoted_text != null) out.quotedText = String(a.quoted_text)
   if (a.preview != null) out.preview = String(a.preview)
+  if (a.thumb != null) out.thumb = Boolean(a.thumb)
   return out
 }
 

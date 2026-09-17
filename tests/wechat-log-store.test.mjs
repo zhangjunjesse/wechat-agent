@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { WechatLogStore } from '../src/services/wechat-log-store.mjs'
+import { WechatLogStore, parseAttachment } from '../src/services/wechat-log-store.mjs'
 
 // Mirrors server/receiver.py's SCHEMA (wechat-chatlog-dsh repo) so tests stay
 // honest about the real on-disk shape this store reads.
@@ -285,7 +285,7 @@ test('attachment JSON is parsed into whitelisted structured fields per kind (ADR
   withAttachmentStore((store) => {
     const r = store.searchChat({ chat: '助手' }, wangwu)
     const [img, file, link, quote] = r.messages.slice(0, 4).map((m) => m.attachment)
-    assert.deepEqual(img, { kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335 })
+    assert.deepEqual(img, { kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335, thumb: false })
     assert.deepEqual(file, { kind: 'file', available: false, filename: '周报.docx', reason: '设备离线' })
     assert.deepEqual(link, { kind: 'link', title: '一篇分享', url: 'https://example.com/a' })
     assert.deepEqual(quote, { kind: 'quote', reply: '@助手 看一下', quotedName: '李四', quotedText: '原始被引用文本' })
@@ -305,4 +305,17 @@ test('available=false keeps the honest reason; unparsable attachment falls back 
     assert.equal(text.attachment, null)
     assert.equal(text.content, '纯文本')
   })
+})
+
+// ---- ADR-0034: thumb（缩略图）字段透传 ----
+
+test('parseAttachment passes through thumb:true/false, and leaves it absent when the source JSON never had it (ADR-0034)', () => {
+  const withThumbTrue = parseAttachment(JSON.stringify({ kind: 'image', media_id: 'a'.repeat(16), thumb: true }))
+  assert.equal(withThumbTrue.thumb, true)
+
+  const withThumbFalse = parseAttachment(JSON.stringify({ kind: 'image', media_id: 'a'.repeat(16), thumb: false }))
+  assert.equal(withThumbFalse.thumb, false)
+
+  const withoutThumb = parseAttachment(JSON.stringify({ kind: 'image', media_id: 'a'.repeat(16) }))
+  assert.equal('thumb' in withoutThumb, false) // 老数据没有这个字段，不应凭空造出来
 })

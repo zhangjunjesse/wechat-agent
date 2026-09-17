@@ -215,3 +215,70 @@ test('wechat_fetch_chat_file rejects malformed time and reports empty windows cl
   assert.match(await call(wechatFetchChatFile, { chat: '项目群', time: '昨天' }, ctx), /时间格式不对/)
   assert.match(await call(wechatFetchChatFile, { chat: '项目群', time: '2026-09-16 10:00' }, ctx), /没有找到带附件的消息/)
 })
+
+// ---- ADR-0034: thumb（缩略图）字段的诚实提示 ----
+
+test('formatResult marks images that are currently thumbnail-only, so the model does not treat them as full images (ADR-0034)', async () => {
+  const store = makeFakeStore({
+    searchChat: () => ({
+      truncated: false,
+      messages: [attMsg({ kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 7986, thumb: true })],
+    }),
+  })
+  const { wechatSearchChat } = wechatTools({ wechatLogStore: store })
+  const out = await call(wechatSearchChat, { chat: '项目群' }, ctx)
+  assert.match(out, /只有缩略图/)
+})
+
+test('wechat_fetch_chat_file warns when the fetched image is still thumbnail-only (ADR-0034)', async () => {
+  const tmp = path.join(os.tmpdir(), `wft-thumb-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const root = path.join(tmp, 'users')
+  const mediaDir = path.join(tmp, 'media')
+  fs.mkdirSync(mediaDir, { recursive: true })
+  fs.writeFileSync(path.join(mediaDir, 'cca29ff8e2b515c7bfd7a52a.png'), 'thumb-bytes')
+  const store = makeFakeStore({
+    searchChat: () => ({
+      truncated: false,
+      messages: [attMsg({ kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 7986, thumb: true })],
+    }),
+  })
+  try {
+    const { wechatFetchChatFile } = wechatTools({ wechatLogStore: store, root, mediaDir })
+    const out = await call(wechatFetchChatFile, { chat: '项目群', time: '2026-09-16 10:00' }, ctx)
+    assert.match(out, /已取回图片：inbox\//)
+    assert.match(out, /只是缩略图/)
+    assert.match(out, /image_describe|点开这张图/) // 提示别急着丢给视觉模型，建议先在微信里点开原图
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('wechat_fetch_chat_file stays silent about thumbnails when thumb is false or absent — no regression (ADR-0034)', async () => {
+  const tmp = path.join(os.tmpdir(), `wft-nothumb-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const root = path.join(tmp, 'users')
+  const mediaDir = path.join(tmp, 'media')
+  fs.mkdirSync(mediaDir, { recursive: true })
+  fs.writeFileSync(path.join(mediaDir, 'cca29ff8e2b515c7bfd7a52a.png'), 'full-bytes')
+  fs.writeFileSync(path.join(mediaDir, 'deadbeefdeadbeefdeadbeef.png'), 'full-bytes-2')
+  const store = makeFakeStore({
+    searchChat: () => ({
+      truncated: false,
+      messages: [
+        attMsg({ kind: 'image', available: true, mediaId: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335, thumb: false }, { content: '[图片1]' }),
+        attMsg({ kind: 'image', available: true, mediaId: 'deadbeefdeadbeefdeadbeef', ext: 'png', size: 61335 }, { content: '[图片2]' }),
+      ],
+    }),
+  })
+  try {
+    const { wechatFetchChatFile } = wechatTools({ wechatLogStore: store, root, mediaDir })
+    const out = await call(wechatFetchChatFile, { chat: '项目群', time: '2026-09-16 10:00' }, ctx)
+    const lines = out.split('\n')
+    assert.equal(lines.length, 2)
+    for (const line of lines) {
+      assert.match(line, /^已取回图片：inbox\/[^（]+（[^）]+）$/) // 没有额外的缩略图警告尾巴
+      assert.doesNotMatch(line, /缩略图/)
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})

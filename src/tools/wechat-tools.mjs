@@ -96,7 +96,8 @@ export function wechatTools({ wechatLogStore, root, mediaDir, fetchMedia = fetch
       '之后可直接用 read_file 查看、image_describe/image_generate 处理、send_file 发送。' +
       '定位方式是"会话 + 消息时间"：time 照抄 wechat_search_chat 等搜索结果里那条消息显示的时间戳，' +
       '同一分钟内的附件会全部取回（最多 5 个，可用 filename 过滤）。' +
-      '分享链接（link）没有文件，直接返回 url；标记"未同步"的附件会如实说明取不到的原因。' +
+      '分享链接（link）没有文件，直接返回 url；标记"未同步"的附件会如实说明取不到的原因；' +
+      '图片如果目前只同步到了缩略图会明确提示（缩略图很小很糊，看不出内容，别直接拿去 image_describe）。' +
       '只能取我自己所在群/私聊里的附件（与搜索工具同一套权限边界）。',
     parameters: {
       type: 'object',
@@ -137,7 +138,10 @@ export function wechatTools({ wechatLogStore, root, mediaDir, fetchMedia = fetch
         try {
           const f = await fetchMedia({ attachment: a, mediaDir, userId, root })
           fetched++
-          out.push(`已取回${labelOf(f.kind)}：${f.path}（${f.name}，${formatSize(f.size)}）`)
+          const thumbNote = a.thumb
+            ? '（⚠️ 现在同步到的还只是缩略图，很小很糊，基本看不出内容——建议让对方在微信里点开这张图看一眼，原图同步过来后再重新取一次）'
+            : ''
+          out.push(`已取回${labelOf(f.kind)}：${f.path}（${f.name}，${formatSize(f.size)}）${thumbNote}`)
         } catch (e) {
           out.push(`「${a.filename || labelOf(a.kind)}」取回失败：${e.message}`)
         }
@@ -169,7 +173,9 @@ function renderBody(m) {
   if (!a) return m.content
   switch (a.kind) {
     case 'image':
-      return a.available === false ? `[图片·未同步${a.reason ? `：${a.reason}` : ''}]` : `[图片${a.ext ? ` ${a.ext}` : ''}${a.size ? ` ${formatSize(a.size)}` : ''}]`
+      return a.available === false
+        ? `[图片·未同步${a.reason ? `：${a.reason}` : ''}]`
+        : `[图片${a.ext ? ` ${a.ext}` : ''}${a.size ? ` ${formatSize(a.size)}` : ''}${a.thumb ? '·目前只有缩略图，看不清内容' : ''}]`
     case 'file':
       return a.available === false
         ? `[文件·未同步 ${a.filename || ''}${a.reason ? `：${a.reason}` : ''}]`

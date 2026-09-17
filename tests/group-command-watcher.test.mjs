@@ -172,6 +172,36 @@ test('watcher reports unsynced attachments honestly and passes link shares throu
   }
 })
 
+// ---- ADR-0034: thumb（缩略图）字段的诚实提示 ----
+
+test('watcher warns in the prompt when the image attachment is thumbnail-only (ADR-0034)', async () => {
+  const THUMB_ATTACHMENT = JSON.stringify({ kind: 'image', available: true, media_id: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 7986, thumb: true })
+  const { cursorFile, watcher, calls } = setup({
+    rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 1789471204, sender_display: 'Z.俊', content: '@助手 这张图看一下', attachment: THUMB_ATTACHMENT }],
+  })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 1)
+    assert.match(calls[0].text, /只同步到缩略图/)
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
+test('watcher stays silent about thumbnails when thumb is false or absent — no regression (ADR-0034)', async () => {
+  const IMG_ATTACHMENT = JSON.stringify({ kind: 'image', available: true, media_id: 'cca29ff8e2b515c7bfd7a52a', ext: 'png', size: 61335, thumb: false })
+  const { cursorFile, watcher, calls } = setup({
+    rows: [{ msg_id: 'm1', chat_wxid: 'g1@chatroom', chat_display: '测试群', ts: 1789471204, sender_display: 'Z.俊', content: '@助手 这张图看一下', attachment: IMG_ATTACHMENT }],
+  })
+  try {
+    await watcher.sweep()
+    assert.equal(calls.length, 1)
+    assert.doesNotMatch(calls[0].text, /缩略图/)
+  } finally {
+    fs.rmSync(cursorFile, { force: true })
+  }
+})
+
 // ---- ADR-0032: tiered wxid/nickname sender identification, not OR'd ----
 // Same root cause as accessibleChats: nickname isn't unique across verified
 // profiles. Here the stakes are actually higher than read-access — a wrong
