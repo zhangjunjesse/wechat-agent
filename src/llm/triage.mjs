@@ -18,7 +18,10 @@ import { tryParseWithRepair } from '../services/json-repair.mjs'
 
 const MAX_PLAN = 5
 const ACK_MAX_CHARS = 80
-const DEFAULT_TIMEOUT_MS = 8_000
+// 默认 15s：生产实测（2026-09-18）——同一网关下短消息分诊 5-7s，**带 plan
+// 输出的任务类消息 ~9.2s**；首版设 8s 正好卡在下面，任务消息全部超时降级、
+// 从慢路（主 agent 完整 respond ~49s）绕行。超时只对慢响应生效，不拖快路径。
+const DEFAULT_TIMEOUT_MS = Number(process.env.TRIAGE_TIMEOUT_MS || 15_000)
 
 const TRIAGE_SYSTEM = [
   '你是微信个人助手的消息分诊器。判断用户这条消息是「闲聊/问答」还是「交代任务」，只输出 JSON，不输出任何其他文字。',
