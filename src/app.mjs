@@ -137,7 +137,13 @@ export function createApp({ provider, agent = { async respond({ text }) { return
         // 后续子任务通知走 iLink 推到微信（网页暂无推送通道，见 DESIGN 边界）。
         if (pipeline) {
           const routed = await pipeline.route({ userId, text, attachments: [] })
-          if (routed.kind === 'task') { await routed.commit(); return json(res, 200, { text: routed.ack, task: true, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
+          if (routed.kind === 'task') {
+            // 回执 = 本次 HTTP 响应；commit（含 plan 生成，10-20s）在响应之后
+            // 异步进行——网页用户拿回执不该等 plan（时序 R5 仍成立：响应先写出）。
+            const out = json(res, 200, { text: routed.ack, task: true, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null })
+            routed.commit().catch((error) => console.error(`[turn-pipeline] web commit failed (${userId}): ${error?.stack || error}`))
+            return out
+          }
         }
         const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
