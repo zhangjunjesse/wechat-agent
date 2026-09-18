@@ -3,7 +3,7 @@ import path from 'node:path'
 import { nextRunAt } from './schedule.mjs'
 import { buildReportPrompt, parseReportJson, dedupeItems, renderReportPoster, renderPushText } from './daily-report.mjs'
 import { digestWindowDays, renderDigestPushText, renderQuietText } from './wechat-digest.mjs'
-import { isRetryableError, looksLikeRawJsonPayload, logServerError } from './failure-messaging.mjs'
+import { isRetryableError, looksLikeRawJsonPayload, logServerError, JSON_RETRY_HINT } from './failure-messaging.mjs'
 
 /** 定时任务调度器（DESIGN-timed-tasks.md + DESIGN-daily-report.md + ADR-0018 + ADR-0026）。
  *
@@ -32,7 +32,14 @@ import { isRetryableError, looksLikeRawJsonPayload, logServerError } from './fai
  * **报告任务重试按生成单元独立跟踪（ADR-0028）**：ADR-0027 之后一个报告任务
  * 一轮 = 多个独立生成单元（公共版 + 每个 (用户,主题)），"部分成功部分失败"
  * 是常态；重试判定从任务级全有全无下沉到单元级（`tasks.retry_units` 跨 tick
- * 持久化），重试轮只补跑失败单元，已成功的用户不被重复推送。 */
+ * 持久化），重试轮只补跑失败单元，已成功的用户不被重复推送。
+ *
+ * **解析失败当场重生成 + 失败话术改为"首次静默、最终才说"（ADR-0035 修正
+ * ADR-0026）**：`report_unparsable`/`digest_unparsable` 在 `#generateAndStore`/
+ * `WechatDigestRunner#generate` 内就地多问模型几次（`unparsableRetries`），
+ * 绝大多数偶发坏 JSON 秒级自愈；可重试错误的首次/中间失败不再给用户发消息
+ * （只落日志/`last_error`），只有重试耗尽的最终放弃才发一句口语化说明，
+ * 不可重试错误仍然立刻告知——见 `#unitFailure` 与 docs/ADR-0035。 */
 export class TaskScheduler {
   #taskStore
   #agent
@@ -48,11 +55,12 @@ export class TaskScheduler {
   #tickMs
   #retryMax
   #retryIntervalMs
+  #unparsableRetries
   #onError
   #timer = null
   #running = false
 
-  constructor({ taskStore, agent, provider, profileStore, contextTokens, now = () => Date.now(), tickMs = 30_000, onError = null, reportStore = null, reportUrl = null, posterRender = null, retryMax = 3, retryIntervalMs = 20 * 60_000, digestRunner = null, digestQuietPush = true }) {
+  constructor({ taskStore, agent, provider, profileStore, contextTokens, now = () => Date.now(), tickMs = 30_000, onError = null, reportStore = null, reportUrl = null, posterRender = null, retryMax = 3, retryIntervalMs = 20 * 60_000, unparsableRetries = 2, digestRunner = null, digestQuietPush = true }) {
     this.#taskStore = taskStore
     this.#agent = agent
     this.#provider = provider
@@ -67,6 +75,7 @@ export class TaskScheduler {
     this.#tickMs = tickMs
     this.#retryMax = retryMax
     this.#retryIntervalMs = retryIntervalMs
+    this.#unparsableRetries = unparsableRetries
     this.#onError = onError
   }
 
@@ -209,7 +218,9 @@ export class TaskScheduler {
           for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
         } else {
           const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
-          for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, '', text))
+          // text 为空 = 本次静默（可重试错误的首次/中间失败，ADR-0035 修正）：
+          // 不调 fanoutReport，用户收不到任何消息，只落 results/last_error。
+          for (const userId of plainUsers) results.push(text ? await this.#fanoutReport(task, userId, '', text) : { userId, silent: true })
           results.push({ userId: `task-${task.id}`, error: r.error }) // 公共版失败可观测
           if (!giveUp) nextPending.push({ userId: '', topic: '', attempts: unitAttemptNumber })
         }
@@ -221,7 +232,7 @@ export class TaskScheduler {
           results.push(await this.#fanoutReport(task, unit.userId, r.report.posterPath, this.#pushText(r.report, [unit.topic])))
         } else {
           const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
-          results.push(await this.#fanoutReport(task, unit.userId, '', text))
+          results.push(text ? await this.#fanoutReport(task, unit.userId, '', text) : { userId: unit.userId, silent: true })
           results.push({ userId: `task-${task.id}-${unit.userId}-${unit.topic}`, error: r.error }) // 个性化失败可观测（按主题定位）
           if (!giveUp) nextPending.push({ userId: unit.userId, topic: unit.topic, attempts: unitAttemptNumber })
         }
@@ -287,7 +298,7 @@ export class TaskScheduler {
         continue
       }
       const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
-      results.push(await this.#fanoutReport(task, unit.userId, '', text))
+      results.push(text ? await this.#fanoutReport(task, unit.userId, '', text) : { userId: unit.userId, silent: true })
       results.push({ userId: `task-${task.id}-${unit.userId}`, error: r.error }) // 可观测
       if (!giveUp) nextPending.push({ userId: unit.userId, topic: '', attempts: unitAttemptNumber })
     }
@@ -296,16 +307,10 @@ export class TaskScheduler {
     return { results, retry: nextPending.length > 0 }
   }
 
-  /** 生成失败时推给用户的话术：还有重试机会就如实说"会自动重试"，重试耗尽就
-   * 明说"今天放弃、明天再来"——不再用含糊的"请稍后重试"（其实没人会重试，
-   * 用户只会干等或来问）。报告任务传入的是**该生成单元自己**的尝试次数/余量
-   * （ADR-0028）：说"会自动重试"就必须真的会重试这个单元，不能拿任务级或
-   * 别的单元的状态替它承诺。 */
-  #failureText(task, attemptNumber, isLastAttempt) {
-    if (isLastAttempt) {
-      return `【定时任务「${task.name}」】已重试 ${attemptNumber} 次仍失败，今天不再重试，明天按计划再试。`
-    }
-    return `【定时任务「${task.name}」】本次生成失败，系统会自动重试，无需操作。`
+  /** 重试耗尽时的最终放弃话术（口语化，不含错误码/技术栈/"系统会自动重试"
+   * 这类不会再兑现的承诺——这一刻起是真的不再试了）。 */
+  #finalGiveUpText(task, attemptNumber) {
+    return `【定时任务「${task.name}」】已重试 ${attemptNumber} 次仍失败，今天不再重试，明天按计划再试。`
   }
 
   /** 不可重试错误（402 余额不足/401 鉴权/400 参数）的话术：不说"会自动重试"
@@ -316,43 +321,69 @@ export class TaskScheduler {
   }
 
   /** 单元失败时的推送文案 + 这个单元是否到此为止（不再排进重试）。
-   * 两条独立的整改（2026-09-18 事故，第 1/3 件事）都收在这里：
-   *   1. 绝不能把 `r.rawText` 原样当文案发出去——它是喂给 `parseReportJson`/
-   *      `parseDigestJson` 解析用的原始 LLM 输出，解析失败时**通常**就是一段
-   *      没收尾的 JSON（如 `{"focus":...,"items":[...]}`），而不是人话；只有
-   *      明显是自然语言（如"抱歉，今天没有合适的新闻"）时才展示它，否则一律
-   *      走标准失败话术（`looksLikeRawJsonPayload` 兜底判断）。
-   *   2. 错误分类决定要不要继续排重试（ADR-0026/0028 只有"重试/放弃"两态，
-   *      没有区分错误是否"重试也没用"）——不可重试错误立刻放弃，不占用
-   *      `retryMax` 配额，也不再对用户说一句不会兑现的"会自动重试"。 */
+   * `text` 为空字符串代表**这一次不给用户发任何消息**——调用方必须据此跳过
+   * `#fanoutReport`，不能把空文案当成"正常文案"发出去。
+   *
+   * 三条独立的整改都收在这里：
+   *   1.（2026-09-18 事故第 1/2 件）绝不能把 `r.rawText` 原样当文案发出去——
+   *      它是喂给 `parseReportJson`/`parseDigestJson` 解析用的原始 LLM 输出，
+   *      解析失败时**通常**是一段没收尾的 JSON，而不是人话；只有明显是自然
+   *      语言（如"抱歉，今天没有合适的新闻"）时才展示它，否则一律走标准
+   *      失败话术（`looksLikeRawJsonPayload` 兜底判断）。注意：经第 1 件的
+   *      就地重生成后仍不通过的，才会走到这里——不是每次解析失败都会来。
+   *   2. 错误分类决定要不要继续排重试（ADR-0026/0028）——不可重试错误立刻
+   *      放弃，不占用 `retryMax` 配额。
+   *   3.（本次修正 ADR-0026 的失败话术决策，见 ADR-0035）**可重试错误的
+   *      首次/中间失败不再给用户发任何消息**——就地重试（第 1 件）已经把
+   *      绝大多数瞬时失败压到了秒级自愈，中途每次都提示"系统会自动重试"
+   *      对用户而言只是噪音；只有**最终放弃**（重试耗尽）才真正告知一句。
+   *      不可重试错误不适用"先静默"——它不会自己恢复，必须立刻说明。 */
   #unitFailure(task, r, unitAttemptNumber, unitIsLast) {
     const rawText = String(r.rawText || '').trim()
     const safeRaw = rawText && !looksLikeRawJsonPayload(rawText) ? rawText : ''
     const retryable = isRetryableError({ message: r.error })
     const giveUp = unitIsLast || !retryable
-    const text = safeRaw || (retryable ? this.#failureText(task, unitAttemptNumber, unitIsLast) : this.#nonRetryableFailureText(task))
-    return { text, giveUp }
+    if (safeRaw) return { text: safeRaw, giveUp } // 模型给了人话，直接透传（不是"失败通知"）
+    if (!retryable) return { text: this.#nonRetryableFailureText(task), giveUp } // 不可重试：立刻告知
+    if (!giveUp) return { text: '', giveUp } // 可重试且还没到最后一次：静默，只落日志/last_error
+    return { text: this.#finalGiveUpText(task, unitAttemptNumber), giveUp } // 重试耗尽：最终告知
   }
 
   /** 生成并入库一份报告（userId 为空 = 公共版；非空 = 该用户个性化版）。
    * `topic`（ADR-0027）：非空时只代表**单个**主题——调用方对用户的每个订阅主题
    * 各调一次本方法，而不是把多个主题合并进一次调用；这样每个主题的 prompt、
-   * 去重窗口、生成结果、海报都完全独立，一个主题的新闻不会挤占另一个主题的名额。 */
+   * 去重窗口、生成结果、海报都完全独立，一个主题的新闻不会挤占另一个主题的名额。
+   *
+   * **解析失败当场重生成**（2026-09-18 事故第 1 件整改）：模型偶发吐出不合法
+   * JSON（本次事故是标题里一个未转义双引号）是最常见的失败形态，也是最容易
+   * "秒级自愈"的——重新问一次模型，多半就好了。不值得让用户等
+   * `retryIntervalMs`（20 分钟）那么久才有第二次机会。就地重试只对
+   * **解析失败**（`parseReportJson` 返回 `ok:false`）生效，次数由
+   * `unparsableRetries` 封顶（默认 2 次，即最多问 3 次模型）；真正抛出的异常
+   * （网络/网关/402 等）不吃这个循环，直接走原有的 catch → 分类判定
+   * （ADR-0035 已有逻辑），避免把"不可重试错误"绕过分类立即重试。 */
   async #generateAndStore(task, userId, now, topic = '') {
     const runUserId = `task-${task.id}${userId ? `-${userId}` : ''}${topic ? `-${topic}` : ''}` // 合成用户：ephemeral 执行，主题独立会话
     const topics = topic ? [topic] : []
     try {
       // 近 7 天已报道标题注入 prompt 要求回避（去重窗口按用户+主题维度隔离）
       const recent = this.#reportStore.recentTitles(task.id, 7, 20, { userId: userId || '', topic, now })
-      const reply = await this.#agent.respond({
-        userId: runUserId,
-        text: buildReportPrompt(task, recent, { topics }),
-        profile: { nickname: task.name, wxid: runUserId },
-        channel: null,
-        ephemeral: true,
-      })
-      const rawText = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
-      const parsed = parseReportJson(rawText)
+      const basePrompt = buildReportPrompt(task, recent, { topics })
+      let rawText = ''
+      let parsed = { ok: false }
+      for (let attempt = 1; attempt <= this.#unparsableRetries + 1; attempt++) {
+        const promptText = attempt === 1 ? basePrompt : `${basePrompt}\n\n${JSON_RETRY_HINT}`
+        const reply = await this.#agent.respond({
+          userId: runUserId,
+          text: promptText,
+          profile: { nickname: task.name, wxid: runUserId },
+          channel: null,
+          ephemeral: true,
+        })
+        rawText = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
+        parsed = parseReportJson(rawText)
+        if (parsed.ok) break
+      }
       if (!parsed.ok) return { ok: false, error: 'report_unparsable', rawText }
       // 机械去重（指纹比对近 7 天同一用户+主题的历史；删后不足 3 条保底不删）
       const deduped = dedupeItems(parsed.items, this.#reportStore.recentFingerprints(task.id, 7, { userId: userId || '', topic, now }))

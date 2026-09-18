@@ -14,6 +14,7 @@ import {
   renderDigestPoster,
   renderMessageLines,
 } from './wechat-digest.mjs'
+import { JSON_RETRY_HINT } from './failure-messaging.mjs'
 
 /** 微信日报/周报的 per-user 生成管道（DESIGN-wechat-digest.md）。
  *
@@ -42,9 +43,10 @@ export class WechatDigestRunner {
   #reportStore
   #posterRender
   #maxChats
+  #unparsableRetries
   #onError
 
-  constructor({ agent, wechatLogStore, groupProfiles, memoryStore = null, reportStore, posterRender = null, maxChats = MAX_CHATS_PER_USER, onError = null }) {
+  constructor({ agent, wechatLogStore, groupProfiles, memoryStore = null, reportStore, posterRender = null, maxChats = MAX_CHATS_PER_USER, unparsableRetries = 2, onError = null }) {
     this.#agent = agent
     this.#wechatLogStore = wechatLogStore
     this.#groupProfiles = groupProfiles
@@ -52,6 +54,7 @@ export class WechatDigestRunner {
     this.#reportStore = reportStore
     this.#posterRender = posterRender
     this.#maxChats = maxChats
+    this.#unparsableRetries = unparsableRetries
     this.#onError = onError
   }
 
@@ -122,8 +125,17 @@ export class WechatDigestRunner {
         windowDays,
         now,
       })
-      const rawText = await this.#ask(task, userId, 'reduce', reducePrompt)
-      const digest = parseDigestJson(rawText)
+      // 解析失败当场重生成（2026-09-18 事故第 1 件整改，同 task-scheduler
+      // #generateAndStore 的策略）：多问模型一次通常比等 retryIntervalMs 更快
+      // 自愈，只对"解析失败"生效，次数由 unparsableRetries 封顶。
+      let rawText = ''
+      let digest = { ok: false }
+      for (let attempt = 1; attempt <= this.#unparsableRetries + 1; attempt++) {
+        const promptText = attempt === 1 ? reducePrompt : `${reducePrompt}\n\n${JSON_RETRY_HINT}`
+        rawText = await this.#ask(task, userId, 'reduce', promptText)
+        digest = parseDigestJson(rawText)
+        if (digest.ok) break
+      }
       if (!digest.ok) return { ok: false, error: 'digest_unparsable', rawText }
       if (digest.empty) return { ok: true, empty: true, report: null }
 

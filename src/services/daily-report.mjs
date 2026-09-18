@@ -1,5 +1,6 @@
 import { beijingParts, beijingDateStr } from './time.mjs'
 import { fingerprintOf } from './report-store.mjs'
+import { tryParseWithRepair } from './json-repair.mjs'
 
 /** 日报生成/解析/渲染（DESIGN-daily-report.md）。纯函数，无 IO。
  *
@@ -59,7 +60,13 @@ export function parseReportJson(text) {
   }
   if (end === -1) return { ok: false }
   let obj
-  try { obj = JSON.parse(raw.slice(start, end + 1)) } catch { return { ok: false } }
+  const slice = raw.slice(start, end + 1)
+  try { obj = JSON.parse(slice) } catch {
+    // 有界修复（ADR-0035 第 2 件）：只处理"字符串值内部有未转义引号"这一种
+    // 形态，修复后仍要过一遍 JSON.parse 校验，修不出来就老实放弃。
+    obj = tryParseWithRepair(slice)
+    if (!obj) return { ok: false }
+  }
   if (!obj || typeof obj !== 'object') return { ok: false }
   const list = Array.isArray(obj) ? obj : (Array.isArray(obj.items) ? obj.items : [])
   const items = []

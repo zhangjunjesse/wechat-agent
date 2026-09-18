@@ -55,6 +55,12 @@ export function friendlyChatErrorText(error) {
     : '⚠️ 我这边的服务暂时用不了，看起来不是你这边的问题，我已经记下来了，过一会儿再试试，或者先做点别的。'
 }
 
+/** 解析失败后就地重新生成时追加进 prompt 的纠正提示（2026-09-18 事故第 1 件
+ * 整改：`report_unparsable`/`digest_unparsable` 当场重生成，而不是干等
+ * `retryIntervalMs`）。沿用 daily-report.mjs/wechat-digest.mjs 现有 prompt 的
+ * 简体中文、"请严格...只输出 JSON" 措辞风格，不额外造一套写法。 */
+export const JSON_RETRY_HINT = '注意：你上一次的输出不是合法 JSON，无法被 JSON.parse 直接解析（很可能是字符串值内部出现了未转义的双引号）。请重新输出：必须是能被 JSON.parse 直接解析的合法 JSON；字符串内部如果需要出现双引号，必须写成 \\" 转义；不要输出任何 JSON 之外的文字。'
+
 /** 生成结果是否"看起来像没解析成功、原样漏出来的结构化 JSON"（而不是模型
  * 说的一句人话，比如"抱歉今天没有合适的新闻"）——绝不能把这种内容直接当
  * 推送文案发给用户（2026-09-18 事故：用户收到一整段 `{"focus":...,"items":

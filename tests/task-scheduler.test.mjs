@@ -292,9 +292,11 @@ test('poster image is sent before the short text; poster failure degrades to tex
 // 干等一整天。修法：失败不结算，按 retryIntervalMs 节流、当天重试 retryMax 次，
 // 全部失败才放弃并如实告知"明天再来"。----
 
-test('report generation failure retries with backoff, then gives up for the day and settles', async () => {
+test('report generation failure retries with backoff, silent until it finally gives up (ADR-0035 修正 ADR-0026)', async () => {
   // 用可重试错误（502 网关抖动）——402 这类不可重试错误已经不再走这条"重试到
   // 耗尽"的路径，见下面 "non-retryable generation failure gives up immediately" 。
+  // 新规则（ADR-0035 对 ADR-0026 失败话术的修正）：可重试错误的首次/中间失败
+  // 完全静默（不给用户发任何消息，只落 last_error），只有重试耗尽才告知一句。
   let calls = 0
   const agent = { respond: async () => { calls++; throw new Error('502 Bad Gateway') } }
   let nowMs = NOW
@@ -304,45 +306,47 @@ test('report generation failure retries with backoff, then gives up for the day 
   try {
     profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
 
-    // 第 1 次尝试：失败，不结算（lastRunAt 仍是 0，任务仍"到期"），措辞是"会自动重试"
+    // 第 1 次尝试：失败，不结算（lastRunAt 仍是 0，任务仍"到期"），但**静默**
+    // ——用户什么都收不到，只有服务端 last_error 记下这次失败。
     await scheduler.sweep()
     assert.equal(calls, 1)
     let t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0)
     assert.equal(t.attemptCount, 1)
-    assert.equal(sent.length, 1)
-    assert.match(sent[0].text, /系统会自动重试/)
+    assert.match(t.lastError, /502 Bad Gateway/)
+    assert.equal(sent.length, 0)
 
     // 节流：还没到 retryIntervalMs，立刻再 sweep 不会重试（不浪费一次 LLM 调用）
     await scheduler.sweep()
     assert.equal(calls, 1)
-    assert.equal(sent.length, 1)
+    assert.equal(sent.length, 0)
 
-    // 过了 retryIntervalMs：第 2 次尝试，仍失败，仍未结算
+    // 过了 retryIntervalMs：第 2 次尝试，仍失败，仍未结算，仍然静默
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls, 2)
     t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0)
     assert.equal(t.attemptCount, 2)
-    assert.match(sent[1].text, /系统会自动重试/)
+    assert.equal(sent.length, 0)
 
     // 第 3 次尝试（= retryMax+1）：仍失败——这是最后一次机会，放弃并结算，
-    // 话术改说"今天不再重试，明天按计划再试"（不再是没人会照做的"请稍后重试"）
+    // 这一刻才第一次给用户发消息，话术是"今天不再重试，明天按计划再试"
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls, 3)
     t = store.getTask('global-每日早报')
     assert.ok(t.lastRunAt > 0) // 已结算
     assert.equal(t.attemptCount, 0) // 归零，迎接下一个自然周期
-    assert.match(sent[2].text, /已重试 3 次仍失败，今天不再重试，明天按计划再试/)
+    assert.equal(sent.length, 1) // 全程唯一的一条消息
+    assert.match(sent[0].text, /已重试 3 次仍失败，今天不再重试，明天按计划再试/)
     assert.equal(reportStore.listReports('global-每日早报', 5).length, 0) // 全程没有一份生成成功
 
     // 结算后不会再触发（下次到期是明天）
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls, 3)
-    assert.equal(sent.length, 3)
+    assert.equal(sent.length, 1)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }
@@ -387,18 +391,91 @@ test('non-retryable generation failure (402) gives up immediately instead of bur
 // push" 那个既有测试）才展示 rawText，结构化 JSON 一律换成标准失败话术。
 test('unparsable report whose raw text still looks like JSON never leaks the JSON to the user', async () => {
   // 模拟"有条目但全部因校验失败被丢弃"导致 parseReportJson 判 !ok，但原始输出
-  // 仍是一段完整、可读的 JSON（正是用户实际收到的那种内容）。
+  // 仍是一段完整、可读的 JSON（正是用户实际收到的那种内容）。这个 agent 每次
+  // 都回同样的坏输出，所以第 1 件的就地重生成也救不回来——最终会耗尽
+  // unparsableRetries、再耗尽 retryMax，全程验证 JSON 永远不会泄漏给用户，
+  // 包括中途的静默期和最终放弃的那一条。
   const rawJson = JSON.stringify({ focus: 'AI安全成焦点：OpenAI等巨头秘密联手制定安全框架', items: [{ title: 'x'.repeat(200), summary: '超长标题会被丢弃' }] })
   const agent = { respond: async () => ({ text: rawJson }) }
-  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1' } })
+  let nowMs = NOW
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, now: () => nowMs, retryMax: 1, retryIntervalMs: 1000,
+  })
   try {
     profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+
+    // 第 1 次尝试：可重试失败、还没到最后一次 → 静默，用户收不到任何消息
+    // （更谈不上收到 JSON 原文）。
+    await scheduler.sweep()
+    assert.equal(sent.length, 0)
+    let t = store.getTask('global-每日早报')
+    assert.match(t.lastError, /report_unparsable/)
+    assert.deepEqual(t.retryUnits, [{ userId: '', topic: '', attempts: 1 }])
+
+    // 第 2 次尝试（= retryMax+1）：重试耗尽，最终放弃——这时才发一条消息，
+    // 且这条消息也绝不能是 JSON 原文，走标准的"已重试…仍失败"话术。
+    nowMs += 1000
     await scheduler.sweep()
     assert.equal(sent.length, 1)
     assert.doesNotMatch(sent[0].text, /"focus"/)
     assert.doesNotMatch(sent[0].text, /"items"/)
     assert.doesNotMatch(sent[0].text, /AI安全成焦点/)
-    assert.match(sent[0].text, /系统会自动重试|已重试.*仍失败/) // 走标准失败话术
+    assert.match(sent[0].text, /已重试.*仍失败/)
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 0)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 2026-09-18 事故第 1 件整改：解析失败当场重生成，不等 retryIntervalMs（20 分钟）。
+test('in-place regenerate succeeds within the same sweep after a bad first attempt; user only sees the normal report', async () => {
+  let calls = 0
+  const prompts = []
+  const agent = { respond: async (args) => {
+    calls++
+    prompts.push(args.text)
+    return { text: calls === 1 ? '这次模型没输出 JSON，纯文字道歉' : REPORT_JSON }
+  } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1' } })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    // 第 1 次解析失败、第 2 次成功——都发生在同一次 sweep 里，不等下一个 tick/retryIntervalMs
+    assert.equal(calls, 2)
+    assert.match(prompts[1], /注意：你上一次的输出不是合法 JSON/) // 纠正提示确实追加进了第 2 次的 prompt
+    assert.equal(sent.length, 1)
+    assert.match(sent[0].text, /已送达/) // 正常日报文案，不是失败话术
+    assert.doesNotMatch(sent[0].text, /已重试|无法自动恢复/) // 用户完全感知不到这次失败
+    const t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0) // 一轮内直接结算，没有进入等 retryIntervalMs 的循环
+    assert.deepEqual(t.retryUnits, [])
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 1)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('in-place regenerate exhausts unparsableRetries, then falls back to the unit-level retry queue silently', async () => {
+  // 用一段"看起来像 JSON 但配不平括号"的输出（而不是人话道歉）：#unitFailure
+  // 的 looksLikeRawJsonPayload 兜底只对"人话"透传 rawText，这里要测的是真正
+  // 的静默失败路径，不能被那条兜底分流。
+  let calls = 0
+  const agent = { respond: async () => { calls++; return { text: '{"focus":"半成品，永远缺右括号"' } } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, retryMax: 3, retryIntervalMs: 1000,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    // 默认 unparsableRetries=2 → 一次 unit 尝试内最多问 3 次模型，就地全部失败
+    assert.equal(calls, 3)
+    // 就地重试耗尽后落回单元级重试队列——这仍然是"首次失败"，按 ADR-0035
+    // 的修正保持静默，不发任何消息给用户。
+    assert.equal(sent.length, 0)
+    const t = store.getTask('global-每日早报')
+    assert.match(t.lastError, /report_unparsable/)
+    assert.deepEqual(t.retryUnits, [{ userId: '', topic: '', attempts: 1 }])
+    assert.equal(t.lastRunAt, 0)
     assert.equal(reportStore.listReports('global-每日早报', 5).length, 0)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
@@ -544,15 +621,17 @@ test('one topic failing does not block another topic for the same user (ADR-0027
     store.subscribe('每日早报', 'u1')
     store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
     await scheduler.sweep()
-    // 两条都推送了：AI 是失败话术，芯片是正常海报文案——一个主题失败不拦住
-    // 另一个主题当轮送达。结算语义已按 ADR-0028 收紧：AI 单元还在等重试，
-    // 任务**不**当轮结算（只有 AI 也成功或耗尽重试次数后才结算），但已成功的
-    // 芯片不会被拖进重试循环重复推送（见下方 ADR-0028 的按单元重试测试）。
-    assert.equal(sent.length, 2)
+    // 只有芯片那条推送了；AI 首次失败按 ADR-0035 的修正静默——一个主题失败
+    // 不拦住另一个主题当轮送达，也不会为一个大概率会自愈的失败打扰用户。
+    // 结算语义仍按 ADR-0028 收紧：AI 单元还在等重试，任务**不**当轮结算（只有
+    // AI 也成功或耗尽重试次数后才结算），但已成功的芯片不会被拖进重试循环
+    // 重复推送（见下方 ADR-0028 的按单元重试测试）。
+    assert.equal(sent.length, 1)
     const t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0) // 未结算：AI 单元还挂着
     assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 1 }])
-    assert.ok(sent.some((m) => /系统会自动重试/.test(m.text)))
+    assert.match(t.lastError, /502 Bad Gateway/) // AI 的失败落了日志，只是没发给用户
+    assert.ok(sent.every((m) => !/系统会自动重试/.test(m.text))) // 不再承诺一个会自动重试的消息
     assert.ok(sent.some((m) => /已送达/.test(m.text)))
     assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: '芯片' }).length, 1)
     assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' }).length, 0)
@@ -592,14 +671,14 @@ test('partial failure retries only the failed unit; delivered units are never re
     for (const id of ['u1', 'u2']) profiles.set(id, { userId: id, nickname: 'u' + id, wxid: 'wx-' + id, ilinkUserId: id })
     store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
 
-    // 第 1 轮：3 个单元都跑；AI 失败（收到"会自动重试"，且这个承诺必须兑现），
-    // 公共版/芯片成功送达。任务不结算——不能因为别的单元成功就抛下 AI。
+    // 第 1 轮：3 个单元都跑；AI 首次失败按 ADR-0035 静默（不发消息，但确实会
+    // 在下一轮真的重试），公共版/芯片成功送达。任务不结算——不能因为别的单元
+    // 成功就抛下 AI。
     await scheduler.sweep()
     assert.equal(calls.length, 3)
-    assert.equal(sent.length, 3) // u2 公共版 + u1 芯片 + u1 AI 失败话术
+    assert.equal(sent.length, 2) // u2 公共版 + u1 芯片；AI 失败静默，不占一条
     assert.equal(sent.filter((m) => m.toProviderUserId === 'u2').length, 1)
-    const aiFail = sent.find((m) => m.toProviderUserId === 'u1' && /系统会自动重试/.test(m.text))
-    assert.ok(aiFail, 'AI 单元的失败话术应承诺自动重试（且后面真的会重试）')
+    assert.ok(sent.every((m) => !/系统会自动重试/.test(m.text))) // 不再承诺一个不会兑现太快的消息
     let t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0) // 未结算：AI 单元还在等重试
     assert.equal(t.attemptCount, 1)
@@ -612,10 +691,10 @@ test('partial failure retries only the failed unit; delivered units are never re
     await scheduler.sweep()
     assert.equal(calls.length, 4) // 只多了 1 次生成
     assert.equal(calls[3].userId, 'task-global-每日早报-u1-AI')
-    assert.equal(sent.length, 4) // 只多了 1 条推送（AI 成功版）
+    assert.equal(sent.length, 3) // 首轮 2 条（静默失败不占一条）+ 这轮 AI 成功 1 条
     assert.equal(sent.filter((m) => m.toProviderUserId === 'u2').length, 1) // u2 没有被重复打扰
-    assert.match(sent[3].text, /当前主题：AI/)
-    assert.match(sent[3].text, /已送达/)
+    assert.match(sent[2].text, /当前主题：AI/)
+    assert.match(sent[2].text, /已送达/)
     assert.equal(reportStore.listReports('global-每日早报', 5, { userId: 'u1', topic: 'AI' }).length, 1)
     // 失败单元也成功了 → 任务整体结算，单元状态清空
     t = store.getTask('global-每日早报')
@@ -627,7 +706,7 @@ test('partial failure retries only the failed unit; delivered units are never re
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls.length, 4)
-    assert.equal(sent.length, 4)
+    assert.equal(sent.length, 3)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }
@@ -650,24 +729,25 @@ test('a unit that keeps failing exhausts its own retries, gets the give-up text,
     profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'wx-u1', ilinkUserId: 'u1' })
     store.setReportTopics({ globalName: '每日早报', userId: 'u1', topics: ['AI', '芯片'] })
 
-    // 第 1 轮：芯片成功、AI 失败（第 1 次尝试，承诺自动重试）
+    // 第 1 轮：芯片成功、AI 失败（第 1 次尝试，按 ADR-0035 静默，不发消息）
     await scheduler.sweep()
     assert.equal(calls.length, 2)
+    assert.equal(sent.length, 1) // 只有芯片那一条
     let t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0)
     assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 1 }])
 
-    // 第 2 轮：只重跑 AI，仍失败（第 2 次尝试，还有余量，仍是"会自动重试"）
+    // 第 2 轮：只重跑 AI，仍失败（第 2 次尝试，还有余量，仍然静默）
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls.length, 3)
     t = store.getTask('global-每日早报')
     assert.equal(t.lastRunAt, 0)
     assert.deepEqual(t.retryUnits, [{ userId: 'u1', topic: 'AI', attempts: 2 }])
-    assert.match(sent[sent.length - 1].text, /系统会自动重试/)
+    assert.equal(sent.length, 1) // 仍然只有芯片那一条，第 2 次失败也没发消息
 
-    // 第 3 轮（= retryMax+1 次尝试）：AI 单元重试耗尽——收到"今天不再重试、
-    // 明天再试"的话术，任务整体结算（锚点推到明天），单元状态清空。
+    // 第 3 轮（= retryMax+1 次尝试）：AI 单元重试耗尽——这时才第一次收到
+    // "今天不再重试、明天再试"的话术，任务整体结算（锚点推到明天），单元状态清空。
     nowMs += 1000
     await scheduler.sweep()
     assert.equal(calls.length, 4)
@@ -675,6 +755,7 @@ test('a unit that keeps failing exhausts its own retries, gets the give-up text,
     assert.ok(t.lastRunAt > 0) // 已结算：所有最初尝试过的单元都成功或耗尽
     assert.equal(t.attemptCount, 0)
     assert.deepEqual(t.retryUnits, [])
+    assert.equal(sent.length, 2) // 芯片成功 1 条 + AI 最终放弃 1 条
     assert.match(sent[sent.length - 1].text, /已重试 3 次仍失败，今天不再重试，明天按计划再试/)
 
     // 芯片全程只生成 1 次、推送 1 次（没有被 AI 的重试连累重复打扰）

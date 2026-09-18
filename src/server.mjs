@@ -208,8 +208,12 @@ const schedulerAgent = process.env.OPENAI_API_KEY
 // 只读挂载。未配置时 digestRunner 为 null，digest 类任务整体跳过（不会退化成
 // 推一条空文本），行为与未加此功能一致——同 lark/vision/wechat_* 的条件启用模式。
 // 与日报共用 schedulerAgent（ADR-0028 的独立队列），不再多开一条队列。
+// 解析失败当场重生成的次数上限（ADR-0035 第 1 件）：额外问模型几次，不是
+// retryMax 那种跨 tick/隔 retryIntervalMs 的重试。日报与 digest 共用同一个
+// 环境变量——同一类失败（模型偶发吐坏 JSON），没必要分两套配置。
+const unparsableRetries = Number(process.env.TASK_UNPARSABLE_RETRIES ?? 2)
 const digestRunner = wechatLogStore && schedulerAgent ? new WechatDigestRunner({
-  agent: schedulerAgent, wechatLogStore, groupProfiles, memoryStore, reportStore, posterRender,
+  agent: schedulerAgent, wechatLogStore, groupProfiles, memoryStore, reportStore, posterRender, unparsableRetries,
   onError: (error, info) => console.warn(`digest ${info?.stage || '?'} failed (${info?.userId || '?'}${info?.chat ? `/${info.chat}` : ''}): ${error?.message || error}`),
 }) : null
 if (!digestRunner) console.warn('wechat digest disabled: needs WECHAT_LOG_DB + OPENAI_API_KEY (DESIGN-wechat-digest.md)')
@@ -217,6 +221,7 @@ const scheduler = schedulerAgent ? new TaskScheduler({
   taskStore, agent: schedulerAgent, provider, profileStore, contextTokens, reportStore, reportUrl, posterRender,
   retryMax: Number(process.env.TASK_RETRY_MAX || 3),
   retryIntervalMs: Number(process.env.TASK_RETRY_INTERVAL_MS || 20 * 60_000),
+  unparsableRetries,
   digestRunner,
   // 三节全空时是否发一句"今天各群平静"（DIGEST_QUIET_PUSH=0 则彻底静默）
   digestQuietPush: process.env.DIGEST_QUIET_PUSH !== '0',

@@ -1,6 +1,7 @@
 import { beijingParts, beijingDateStr, beijingDateTimeStr } from './time.mjs'
 import { parseSchedule } from './schedule.mjs'
 import { GROUP_TAGS, GROUP_TAG_LABELS } from './group-profile-store.mjs'
+import { tryParseWithRepair } from './json-repair.mjs'
 
 /** 微信日报/周报的纯函数层（DESIGN-wechat-digest.md）：prompt 构造、JSON 解析、
  * 渲染。无 IO、无 LLM 调用——编排在 wechat-digest-runner.mjs，投递在
@@ -441,7 +442,13 @@ function extractJson(text) {
       else if (raw[i] === close) {
         depth--
         if (depth === 0) {
-          try { return JSON.parse(raw.slice(start, i + 1)) } catch { break }
+          const slice = raw.slice(start, i + 1)
+          try { return JSON.parse(slice) } catch {
+            // 有界修复（ADR-0035 第 2 件），与 daily-report.parseReportJson 同一策略。
+            const repaired = tryParseWithRepair(slice)
+            if (repaired) return repaired
+            break
+          }
         }
       }
     }

@@ -80,7 +80,7 @@ function makeAgent({ reduce = REDUCE_OK, map = MAP_OK, tag = TAG_OK, fail = null
   }
 }
 
-function setup({ agentOpts = {}, memoryStore = null, posterRender = null } = {}) {
+function setup({ agentOpts = {}, agent: agentOverride = null, memoryStore = null, posterRender = null, unparsableRetries = 2 } = {}) {
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   const chatFile = path.join(os.tmpdir(), `dg-chat-${stamp}.db`)
   const gpFile = path.join(os.tmpdir(), `dg-gp-${stamp}.db`)
@@ -89,8 +89,8 @@ function setup({ agentOpts = {}, memoryStore = null, posterRender = null } = {})
   const wechatLogStore = new WechatLogStore({ file: chatFile })
   const groupProfiles = new GroupProfileStore({ file: gpFile })
   const reportStore = new ReportStore({ file: rpFile })
-  const agent = makeAgent(agentOpts)
-  const runner = new WechatDigestRunner({ agent, wechatLogStore, groupProfiles, memoryStore, reportStore, posterRender })
+  const agent = agentOverride || makeAgent(agentOpts)
+  const runner = new WechatDigestRunner({ agent, wechatLogStore, groupProfiles, memoryStore, reportStore, posterRender, unparsableRetries })
   const cleanup = () => {
     wechatLogStore.close(); groupProfiles.close(); reportStore.close()
     for (const f of [chatFile, gpFile, rpFile]) fs.rmSync(f, { force: true })
@@ -301,6 +301,51 @@ test('an unparsable reduce is a real failure (retryable); a failing single group
   const r2 = await mapFail.runner.generate({ task: TASK, userId: 'u-zhang', profile: ZHANG, now: NOW })
   assert.equal(r2.ok, true)
   assert.equal(r2.empty, true)
+})
+
+// 2026-09-18 事故第 1 件整改：reduce 解析失败当场重生成，不等 retryIntervalMs。
+test('reduce in-place regenerate succeeds on the second attempt within the same generate() call', async (t) => {
+  let reduceCalls = 0
+  const prompts = []
+  const agent = {
+    calls: [],
+    respond: async (args) => {
+      const kind = args.text.includes('性质分类') ? 'tag' : args.text.includes('合并规则') ? 'reduce' : 'map'
+      agent.calls.push({ kind, userId: args.userId })
+      if (kind === 'tag') return { text: TAG_OK }
+      if (kind === 'map') return { text: MAP_OK }
+      reduceCalls++
+      prompts.push(args.text)
+      return { text: reduceCalls === 1 ? '模型这次没输出 JSON' : REDUCE_OK }
+    },
+  }
+  const { runner, cleanup } = setup({ agent })
+  t.after(cleanup)
+  const r = await runner.generate({ task: TASK, userId: 'u-zhang', profile: ZHANG, now: NOW })
+  assert.equal(reduceCalls, 2) // 第 1 次坏输出，第 2 次（带纠正提示）成功
+  assert.match(prompts[1], /注意：你上一次的输出不是合法 JSON/)
+  assert.equal(r.ok, true)
+  assert.equal(r.empty, false)
+  assert.ok(r.report) // 用户最终拿到的是正常简报，感知不到中途那次坏输出
+})
+
+test('reduce in-place regenerate exhausts unparsableRetries then reports digest_unparsable', async (t) => {
+  let reduceCalls = 0
+  const agent = {
+    respond: async (args) => {
+      const kind = args.text.includes('性质分类') ? 'tag' : args.text.includes('合并规则') ? 'reduce' : 'map'
+      if (kind === 'tag') return { text: TAG_OK }
+      if (kind === 'map') return { text: MAP_OK }
+      reduceCalls++
+      return { text: '模型死活不给 JSON' }
+    },
+  }
+  const { runner, cleanup } = setup({ agent, unparsableRetries: 2 })
+  t.after(cleanup)
+  const r = await runner.generate({ task: TASK, userId: 'u-zhang', profile: ZHANG, now: NOW })
+  assert.equal(reduceCalls, 3) // unparsableRetries=2 → 最多问 3 次
+  assert.equal(r.ok, false)
+  assert.equal(r.error, 'digest_unparsable')
 })
 
 test('tagging failure degrades to the default tag instead of aborting the digest', async (t) => {

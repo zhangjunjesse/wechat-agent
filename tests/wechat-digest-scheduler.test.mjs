@@ -181,9 +181,10 @@ test('one subscriber failing does not affect another, and only the failed unit i
 
   await ctx.scheduler.sweep()
   assert.deepEqual(attempts.sort(), ['u1', 'u2'])
-  // u1 收到真简报，u2 收到"会自动重试"的诚实话术
+  // u1 收到真简报；u2 首次失败按 ADR-0035 静默——不发任何消息，只落 last_error
+  assert.equal(ctx.sentText.length, 1)
   assert.match(ctx.sentText.find((s) => s.toProviderUserId === 'u1').text, /微信日报 已送达/)
-  assert.match(ctx.sentText.find((s) => s.toProviderUserId === 'u2').text, /会自动重试/)
+  assert.equal(ctx.sentText.find((s) => s.toProviderUserId === 'u2'), undefined)
 
   const task = ctx.store.getTask('global-微信日报')
   assert.deepEqual(task.retryUnits, [{ userId: 'u2', topic: '', attempts: 1 }]) // 只挂 u2

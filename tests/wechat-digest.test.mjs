@@ -121,6 +121,19 @@ test('parseDigestJson distinguishes "unparsable" from "legitimately empty"', () 
   assert.deepEqual(Object.keys(partial.sections), ['action_items'])
 })
 
+// 2026-09-18 事故同一种坏 JSON 形态也可能出现在 digest 的 reduce 输出里
+// （两者共用同一个 LLM，同一类偶发毛病）——ADR-0035 第 2 件的有界修复对
+// daily-report/wechat-digest 两条解析路径一视同仁。
+test('parseDigestJson repairs the same unescaped-quote shape as daily-report', () => {
+  const broken = '{"focus":"简报","action_items":[' +
+    '{"title":"合并为"一个Claude""的公告","summary":"s","source":"项目群","at":"2026-09-16 14:00"}' +
+    '],"work_updates":[],"fun":[]}'
+  assert.throws(() => JSON.parse(broken))
+  const r = parseDigestJson(broken)
+  assert.equal(r.ok, true)
+  assert.equal(r.sections.action_items[0].title, '合并为"一个Claude""的公告'.slice(0, 80))
+})
+
 test('items carry a "来自 XX 群 · 时间" trace and round-trip back into sections', () => {
   assert.equal(sourceLabel({ source: '项目群', at: '2026-09-16 14:30' }), '来自 项目群 · 09-16 14:30')
   assert.equal(sourceLabel({ source: '项目群', at: '2026-09-16' }), '来自 项目群 · 09-16')

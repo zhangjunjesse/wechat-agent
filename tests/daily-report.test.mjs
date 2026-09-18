@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildReportPrompt, parseReportJson, dedupeItems, renderWeChatDigest, renderReportPage, renderReportPoster, renderPushText, normalizeFocus } from '../src/services/daily-report.mjs'
 import { fingerprintOf } from '../src/services/report-store.mjs'
+import { repairUnescapedQuotes, tryParseWithRepair } from '../src/services/json-repair.mjs'
 
 test('buildReportPrompt carries task, dedup list and JSON schema (no cover instruction)', () => {
   const task = { name: '每日早报', instruction: '生成早报' }
@@ -43,6 +44,46 @@ test('parseReportJson handles plain, fenced, wrapped and invalid inputs', () => 
   }))
   assert.equal(mixed.ok, true)
   assert.deepEqual(mixed.items.map((i) => i.title), ['B'])
+})
+
+// 2026-09-18 事故（ADR-0035）：模型产出的 JSON 里一条标题含未转义双引号——
+// `"title":"Anthropic把Claude Cowork与chat合并为"一个Claude""`——导致
+// JSON.parse 在该位置抛 `Expected ',' or '}' after property value`。第 2 件
+// 整改：先做一次有界修复再放弃。
+test('parseReportJson repairs the exact unescaped-quote shape from the 2026-09-18 incident', () => {
+  const broken = '{"focus":"AI资讯","items":[' +
+    '{"title":"Anthropic把Claude Cowork与chat合并为"一个Claude"","summary":"合并说明","source":"官方博客","url":"https://a.com"},' +
+    '{"title":"次条","summary":"摘要2","source":"源2","url":"https://b.com"}' +
+    ']}'
+  // 修复前：这段就是事故复现——JSON.parse 直接抛错。
+  assert.throws(() => JSON.parse(broken))
+  const r = parseReportJson(broken)
+  assert.equal(r.ok, true)
+  assert.equal(r.items.length, 2)
+  assert.equal(r.items[0].title, 'Anthropic把Claude Cowork与chat合并为"一个Claude"')
+  assert.equal(r.items[1].title, '次条')
+})
+
+test('repairUnescapedQuotes never fabricates data when the input is genuinely unfixable garbage', () => {
+  // 截断的 JSON（缺右括号）：parseReportJson 在配平括号那一步就已经判 !ok，
+  // 根本不会走到修复逻辑；这里直接验证 tryParseWithRepair 对不成形输入的
+  // 保守行为——宁可返回 null 也不要凑出看似合法实则错误的数据。
+  assert.equal(tryParseWithRepair('{"title": "没有收尾的字符串'), null)
+  // 语法错误不是"未转义引号"这种形态（多余逗号）：修复器不认识这种问题，
+  // 逐字符转写后原样返回，仍然通不过 JSON.parse，保持 null。
+  assert.equal(tryParseWithRepair('{"a":1,}'), null)
+  // 完全非 JSON 的乱码：不会被误修成"看似合法"的结构。
+  assert.equal(tryParseWithRepair('这不是 JSON 也没有引号问题'), null)
+  // 合法输入没有可修的地方：修复结果与原文一致 → 视为"没什么可修" → null，
+  // 调用方只在 JSON.parse 已经失败时才会调用这个函数，这里只验证边界行为。
+  assert.equal(tryParseWithRepair('{"a":1}'), null)
+})
+
+test('repairUnescapedQuotes escapes an inner quote only when it is not followed by a JSON terminator', () => {
+  const fixed = repairUnescapedQuotes('"a"b"c":"d"')
+  // 第 1、2 个引号后面跟的都不是终止符（b / c）→ 判定为内部引号，转义；
+  // 第 3 个引号后面跟的是冒号 → 判定为真正的键名终止符，不转义。
+  assert.equal(fixed, '"a\\"b\\"c":"d"')
 })
 
 test('dedupeItems drops 7-day duplicates but keeps a floor of 3', () => {
