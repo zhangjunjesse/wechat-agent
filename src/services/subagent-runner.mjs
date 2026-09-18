@@ -25,6 +25,7 @@ export class SubagentRunner {
   #provider
   #contextTokens
   #profileStore
+  #sessions
   #maxConcurrentPerUser
   #timeoutMs
   #maxAutoAttempts
@@ -38,7 +39,7 @@ export class SubagentRunner {
   #timer = null
   #onError
 
-  constructor({ agentFactory, board, runs, provider, contextTokens, profileStore = null, maxConcurrentPerUser = 2, timeoutMs = 300_000, maxAutoAttempts = 3, retryBackoffMs = 60_000, mainStaleMs = 10 * 60_000, sweepIntervalMs = 30_000, onError = null }) {
+  constructor({ agentFactory, board, runs, provider, contextTokens, profileStore = null, sessions = null, maxConcurrentPerUser = 2, timeoutMs = 300_000, maxAutoAttempts = 3, retryBackoffMs = 60_000, mainStaleMs = 10 * 60_000, sweepIntervalMs = 30_000, onError = null }) {
     if (typeof agentFactory !== 'function') throw new TypeError('agentFactory is required')
     if (!board) throw new TypeError('board (AgentTaskStore) is required')
     this.#agentFactory = agentFactory
@@ -47,6 +48,7 @@ export class SubagentRunner {
     this.#provider = provider
     this.#contextTokens = contextTokens
     this.#profileStore = profileStore
+    this.#sessions = sessions
     this.#maxConcurrentPerUser = Math.max(1, Number(maxConcurrentPerUser) || 2)
     this.#timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 300_000
     this.#maxAutoAttempts = Math.max(1, Number(maxAutoAttempts) || 3)
@@ -149,7 +151,7 @@ export class SubagentRunner {
 
     if (outcome.status === 'done') {
       this.#board.complete(task.id, { result: outcome.result })
-      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'done', result: outcome.result }))
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'done', result: outcome.result, ...this.#batchState(task) }))
       return
     }
 
@@ -158,20 +160,43 @@ export class SubagentRunner {
     const retryable = outcome.status === 'timeout' || isRetryableError(outcome.error)
     if (!retryable) {
       this.#board.release(task.id, { error: outcome.error, setAutoAttempts: this.#maxAutoAttempts })
-      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'nonRetryable' }))
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'nonRetryable', ...this.#batchState(task) }))
       return
     }
     const released = this.#board.release(task.id, { error: outcome.error, countAttempt: true })
     if (released && released.autoAttempts >= this.#maxAutoAttempts) {
-      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'gaveUp' }))
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'gaveUp', ...this.#batchState(task) }))
     }
     // 未到上限：中间静默（ADR-0035），下一轮 sweep 自动重挑
+  }
+
+  /** 批次状态（DESIGN-turn-pipeline）：同一次分诊落板的 plan 共享 metadata.batchId。
+   * 通知带 (n/N) 进度；批内全部"尘埃落定"时，收尾说明合并进最后这条通知
+   * （不另发一条，微信里少一条是一条）。"尘埃落定" = completed/deleted，或
+   * pending 且退避次数已顶满（不会再自动重试）。 */
+  #batchState(task) {
+    const batchId = task.metadata?.batchId
+    const batchSize = Number(task.metadata?.batchSize || 0)
+    if (!batchId || batchSize <= 1) return {}
+    const siblings = this.#board.listByBatch ? this.#board.listByBatch(task.userId, batchId) : []
+    const settled = siblings.filter((t) => ['completed', 'deleted'].includes(t.status) || (t.status === 'pending' && t.autoAttempts >= this.#maxAutoAttempts))
+    const ok = settled.filter((t) => t.status === 'completed').length
+    return {
+      progress: `(${settled.length}/${batchSize}) `,
+      batchClosed: settled.length >= batchSize,
+      batchOk: ok,
+      batchFailed: settled.length - ok,
+    }
   }
 
   async #safeNotify(run, task, text) {
     try {
       if (!run || !this.#runs.markNotified(run.id)) return // notified CAS：至多一次
       const target = this.#tokenFor(task.userId)
+      // S2（DESIGN-turn-pipeline）：这条通知是"用户看到的对话事实"，必须进
+      // transcript——否则用户回"这个摘要不错，再加一段"时主 agent 不知所指。
+      // 无推送通道时也记（板上有结果，下轮对话该能引用它）。
+      this.#sessions?.appendAssistant?.(task.userId, text)
       if (!target) return
       await this.#provider.sendText({ providerBotId: target.providerBotId, toProviderUserId: target.toProviderUserId, contextToken: target.contextToken, text })
     } catch (error) {
@@ -205,12 +230,19 @@ export function buildSubagentPrompt({ runId, boardId, subject, description = '' 
 }
 
 /** 结算通知文案。纪律（ADR-0035）：不含错误码/原始报错；失败不承诺"会自动重试"
- * （gaveUp/nonRetryable 时自动重试已经停了，说了就是不会兑现的承诺）。 */
-export function renderSettlementText({ boardId, subject, kind, result = '' }) {
-  const label = `任务 #${boardId}（${truncate(subject, 24)}）`
-  if (kind === 'done') return `☑️ ${label}完成：${truncate(result, 200)}`
-  if (kind === 'nonRetryable') return `⚠️ ${label}这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。`
-  return `⚠️ ${label}试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。`
+ * （gaveUp/nonRetryable 时自动重试已经停了，说了就是不会兑现的承诺）。
+ * 批次（progress/batchClosed 来自 #batchState）：多任务批次的每条通知带
+ * (n/N)，收尾说明合并进最后一条——不额外发独立汇总。 */
+export function renderSettlementText({ boardId, subject, kind, result = '', progress = '', batchClosed = false, batchOk = 0, batchFailed = 0 }) {
+  const label = `${progress}任务 #${boardId}（${truncate(subject, 24)}）`
+  const tail = batchClosed
+    ? (batchFailed > 0
+      ? '\n—— 这批事办完了：' + batchOk + ' 件完成，' + batchFailed + ' 件没做成。'
+      : '\n—— 这批事都办完了。')
+    : ''
+  if (kind === 'done') return `☑️ ${label}完成：${truncate(result, 200)}${tail}`
+  if (kind === 'nonRetryable') return `⚠️ ${label}这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
+  return `⚠️ ${label}试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
 }
 
 function truncate(text, max) {

@@ -24,12 +24,12 @@ import { renderDigestPage } from './services/wechat-digest.mjs'
  * 记录。 */
 export const DEFAULT_SUBSCRIPTIONS = ['每日资讯', '微信日报', '微信周报']
 
-export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null, taskStore = null, boardStore = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onVerifiedError = (error, name) => console.warn(`default subscription failed${name ? ` (${name})` : ''}: ${error?.message || error}`) }) {
+export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null, taskStore = null, boardStore = null, pipeline = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onVerifiedError = (error, name) => console.warn(`default subscription failed${name ? ` (${name})` : ''}: ${error?.message || error}`) }) {
   const owned = []
   let polling
   const lastPollLog = new Map() // providerBotId -> { at, error }
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
-  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens, boardStore })
+  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens, boardStore, pipeline })
   // 核验通过 → 默认订阅（ADR-0031）。VerificationService 的 onVerified 钩子此前
   // 一直是 null（存在但没人接），这里是它的第一个使用者。
   const verification = verifier
@@ -132,7 +132,14 @@ export function createApp({ provider, agent = { async respond({ text }) { return
           return json(res, 400, { error: `lark_auth_failed: ${e.message}` })
         }
       }
-      if (req.method === 'POST' && url.pathname === '/api/chat') { const body = await readJson(req); const browserId = assertHeader(req, 'x-user-id'); const text = String(body.text || '').trim(); if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' }); const profile = await profileStore?.get(browserId); if (process.env.NODE_ENV === 'production' && !profile?.nickname && !profile?.wxid) return json(res, 403, { error: 'verification_required', message: '请先完成身份验证。' }); const userId = await profileStore?.stableKey(browserId); const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
+      if (req.method === 'POST' && url.pathname === '/api/chat') { const body = await readJson(req); const browserId = assertHeader(req, 'x-user-id'); const text = String(body.text || '').trim(); if (!text || text.length > 4000) return json(res, 400, { error: 'invalid_text' }); const profile = await profileStore?.get(browserId); if (process.env.NODE_ENV === 'production' && !profile?.nickname && !profile?.wxid) return json(res, 403, { error: 'verification_required', message: '请先完成身份验证。' }); const userId = await profileStore?.stableKey(browserId)
+        // 固定反馈管道（ADR-0038）：网页路径的受理回执 = 本次 HTTP 响应本身（~3s 返回）。
+        // 后续子任务通知走 iLink 推到微信（网页暂无推送通道，见 DESIGN 边界）。
+        if (pipeline) {
+          const routed = await pipeline.route({ userId, text, attachments: [] })
+          if (routed.kind === 'task') { await routed.commit(); return json(res, 200, { text: routed.ack, task: true, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
+        }
+        const result = await agent.respond({ userId, text, profile }); return json(res, 200, { text: result.text, profile: profile ? { nickname: profile.nickname, wxid: profile.wxid } : null }) }
       const match = url.pathname.match(/^\/api\/bindings\/([^/]+)$/)
       if (req.method === 'GET' && match) { const binding = await bindings.refresh(assertHeader(req, 'x-user-id'), match[1]); bind(binding); const live = owned.find((x) => x.id === binding.id); return json(res, 200, { ...binding, sessionExpired: live?.sessionExpired === true || false, lastPollError: live?.lastPollError || '' }) }
       if (req.method === 'POST' && url.pathname === '/api/bot/webhook') return json(res, 200, await router.handleInbound(await readJson(req)))

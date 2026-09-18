@@ -13,13 +13,14 @@ export class MessageRouter {
   #contextTokens
   #progress
   #boardStore
+  #pipeline
 
   /** `progress` 默认**关闭** ack/心跳（ADR-0037）：实测基线延迟（生产 "你好" 8.8s、
    * "现在几点" 7.6s）本就压在原 8 秒阈值上，结果每句闲聊都先收一条"收到，正在处理"
    * 再收答案——一问两条。长活的反馈通道现在是任务板（ADR-0036：建单即确认、
    * activeForm 心跳、完成通知），这一层不再承担它。需要回来时用
    * `CHAT_PROGRESS_ACK_MS` 设一个**远高于基线**的值（如 45000）而不是恢复 8000。 */
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = { ackDelayMs: Number(process.env.CHAT_PROGRESS_ACK_MS ?? 0) }, boardStore = null }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = { ackDelayMs: Number(process.env.CHAT_PROGRESS_ACK_MS ?? 0) }, boardStore = null, pipeline = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
@@ -29,6 +30,7 @@ export class MessageRouter {
     this.#contextTokens = contextTokens
     this.#progress = progress
     this.#boardStore = boardStore
+    this.#pipeline = pipeline
   }
 
   async handleInbound(event) {
@@ -63,6 +65,21 @@ export class MessageRouter {
     // the agent itself. Web chat calls agent.respond() with no channel at
     // all, so tools that need it degrade gracefully (see wechat-send-tools.mjs).
     const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
+    // 固定反馈管道（DESIGN-turn-pipeline / ADR-0038）：分诊为 task → 先发受理
+    // 回执（~3s），发送**成功后**才落板（时序规则：防子任务极快时"完成通知先于
+    // 回执"）。分诊为 chat / 管道未装配 / 分诊内部失败 → 走下面的原路径，行为
+    // 与管道上线前完全一致（route() 永不 throw）。
+    if (this.#pipeline) {
+      const routed = await this.#pipeline.route({ userId: tenantKey, text: normalized.text || '', attachments: normalized.attachments || [] })
+      if (routed.kind === 'task') {
+        const ackToken = this.#contextTokens?.get(normalized.providerUserId)?.contextToken || normalized.contextToken
+        const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: routed.ack, contextToken: ackToken })
+        await routed.commit() // 回执已送达 → 落板 + poke + 会话/记忆记账（S1/S5 在 commit 内）
+        history.push({ role: 'assistant', text: routed.ack })
+        this.#conversations.set(key, history)
+        return { accepted: true, duplicate: false, task: true, providerMessageId: sent.providerMessageId, text: routed.ack }
+      }
+    }
     // 长任务体验：8 秒未完成先 ack，之后每 40 秒心跳（避免用户干等无感知）。
     // 发送用最新 token（长任务期间可能刷新）。
     // 心跳内容化（DESIGN-agent-task-board §3.6）：板上有进行中任务时，心跳带

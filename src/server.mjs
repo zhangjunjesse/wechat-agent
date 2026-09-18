@@ -33,6 +33,8 @@ import { VisionClient } from './services/vision-client.mjs'
 import { GroupProfileStore } from './services/group-profile-store.mjs'
 import { WechatDigestRunner } from './services/wechat-digest-runner.mjs'
 import { ExpertModeStore } from './services/expert-mode-store.mjs'
+import { createTriage } from './llm/triage.mjs'
+import { TurnPipeline } from './services/turn-pipeline.mjs'
 import { ModelRoutingAgent } from './llm/model-routing-agent.mjs'
 
 const userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files'
@@ -178,6 +180,7 @@ const subagentRunner = agent ? new SubagentRunner({
   agentFactory: makeSubagent,
   board: boardStore,
   runs: taskRunStore,
+  sessions: sessionStore,
   provider,
   contextTokens,
   profileStore,
@@ -192,6 +195,15 @@ if (subagentRunner) {
   tools.push(bt.taskCreate, bt.taskList, bt.taskGet, bt.taskUpdate, bt.taskOutput)
   subagentRunner.start()
 }
+
+// 固定反馈管道（DESIGN-turn-pipeline / ADR-0038）：分诊（轻量 LLM，复用记忆侧
+// memoryComplete：单轮、关思考）→ task 则回执先行 + 计划机械落板交 drain。
+// TURN_PIPELINE=0 是保险丝：关掉后所有消息走主 agent 原路径，行为与管道
+// 上线前完全一致（分诊内部失败也同样降级，双重保底）。
+const turnPipeline = process.env.TURN_PIPELINE !== '0' && subagentRunner
+  ? new TurnPipeline({ triage: createTriage({ complete: memoryComplete }), board: boardStore, runner: subagentRunner, sessions: sessionStore, memory: memoryManager })
+  : null
+if (!turnPipeline) console.warn('turn pipeline disabled (TURN_PIPELINE=0 or no runner): all messages take the legacy chat path')
 
 // Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
 // Report tasks (DESIGN-daily-report.md + ADR-0018): one generation + fan-out;
@@ -254,7 +266,7 @@ groupWatcher?.start()
 
 // `taskStore` 进 createApp 是为了 ADR-0031 的"核验通过即默认订阅"——VerificationService
 // 的 onVerified 钩子此前一直没人接，现在由 createApp 内部接上。
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark, taskStore, boardStore })
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark, taskStore, boardStore, pipeline: turnPipeline })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })

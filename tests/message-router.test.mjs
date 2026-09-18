@@ -76,3 +76,41 @@ test('CHAT_PROGRESS_ACK_MS can bring the ack back at a higher threshold', async 
     else process.env.CHAT_PROGRESS_ACK_MS = prev
   }
 })
+
+test('pipeline task path: ack sent first, plan boarded only after, respond() never called (ADR-0038)', async () => {
+  const events = []
+  const provider = { sendText: async (a) => { events.push(`send:${a.text}`); return { providerMessageId: 'out-1' } } }
+  const bindings = [{ providerBotId: 'bot-1', userId: 'u1', profile: { providerUserId: 'wx-1' } }]
+  let respondCalled = false
+  const router = new MessageRouter({
+    bindings, provider, allowPeerUsers: false, requireVerified: false,
+    agent: { respond: async () => { respondCalled = true; return { text: '不该到这' } } },
+    pipeline: {
+      route: async ({ userId, text }) => ({
+        kind: 'task',
+        ack: '收到，我分两步做',
+        commit: async () => { events.push(`commit:${userId}:${text}`); return { batchId: 'b', taskIds: [1, 2] } },
+      }),
+    },
+  })
+  const result = await router.handleInbound(inbound('导出文档再写摘要'))
+  assert.equal(result.task, true)
+  assert.equal(result.text, '收到，我分两步做')
+  assert.equal(respondCalled, false, '任务路不跑主 agent 完整 respond')
+  // 时序：回执发送在前，落板 commit 在后
+  assert.deepEqual(events, ['send:收到，我分两步做', 'commit:wx-1:导出文档再写摘要'])
+})
+
+test('pipeline chat verdict falls through to the legacy path untouched', async () => {
+  const sent = []
+  const provider = { sendText: async (a) => { sent.push(a.text); return { providerMessageId: 'o' } } }
+  const bindings = [{ providerBotId: 'bot-1', userId: 'u1', profile: { providerUserId: 'wx-1' } }]
+  const router = new MessageRouter({
+    bindings, provider, allowPeerUsers: false, requireVerified: false,
+    agent: { respond: async () => ({ text: '直答' }) },
+    pipeline: { route: async () => ({ kind: 'chat' }) },
+  })
+  const result = await router.handleInbound(inbound('现在几点'))
+  assert.equal(result.text, '直答')
+  assert.deepEqual(sent, ['直答'])
+})

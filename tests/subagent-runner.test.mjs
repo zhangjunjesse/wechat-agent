@@ -209,3 +209,70 @@ test('prompt is self-contained; settlement texts follow ADR-0035 wording rules',
   const long = renderSettlementText({ boardId: 1, subject: 's', kind: 'done', result: 'x'.repeat(400) })
   assert.ok(long.length < 260, `应截断，实际 ${long.length}`)
 })
+
+test('batch of 2: progress markers on each completion, closing line merged into the LAST one, notifications land in session', async () => {
+  const sfile = path.join(os.tmpdir(), `runner-sess-${Date.now()}.db`)
+  const { SessionStore } = await import('../src/services/session-store.mjs')
+  const sessions = new SessionStore({ file: sfile })
+  const dbFile = path.join(os.tmpdir(), `runner-batch-${Date.now()}.db`)
+  const runs = new TaskRunStore({ file: dbFile })
+  const board = new AgentTaskStore({ file: dbFile })
+  const sent = []
+  const runner = new SubagentRunner({
+    agentFactory: async () => ({ respond: async (a) => ({ text: `做完了：${a.text.includes('查资料') ? '资料' : '文档'}` }) }),
+    board, runs, sessions,
+    provider: { sendText: async (a) => { sent.push(a.text); return {} } },
+    contextTokens: { get: (uid) => ({ contextToken: `tok`, providerBotId: `bot` }) },
+    maxConcurrentPerUser: 1, // 串行执行保证顺序可断言
+    timeoutMs: 60_000,
+  })
+  try {
+    const batchId = 'batch-x'
+    const a = board.create({ userId: 'u1', subject: '查资料', description: '', metadata: { batchId, batchSize: 2, batchIndex: 0 } })
+    const b = board.create({ userId: 'u1', subject: '写文档', description: '', metadata: { batchId, batchSize: 2, batchIndex: 1 }, blockedBy: [a.id] })
+    runner.poke('u1')
+    assert.ok(await waitFor(() => sent.length === 2, 4000), `应两条通知，实际 ${sent.length}`)
+    assert.match(sent[0], /\(1\/2\) 任务 #/)
+    assert.doesNotMatch(sent[0], /都办完了/, '第一条不带收尾')
+    assert.match(sent[1], /\(2\/2\) 任务 #/)
+    assert.match(sent[1], /这批事都办完了/, '收尾合并进最后一条')
+    // S2：两条通知都进 transcript
+    const { transcript } = sessions.get('u1')
+    assert.equal(transcript.filter((m) => m.role === 'assistant' && /任务 #/.test(m.content)).length, 2)
+  } finally { runner.stop(); runs.close(); board.close(); sessions.close(); fs.rmSync(dbFile, { force: true, maxRetries: 5, retryDelay: 50 }); fs.rmSync(sfile, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})
+
+test('single-task batch keeps the plain notification (no progress marker, no closing line)', async () => {
+  const { file, board, runs, runner, sent } = setup({ respond: async () => ({ text: 'ok' }) })
+  try {
+    board.create({ userId: 'u1', subject: 's', description: '', metadata: { batchId: 'b1', batchSize: 1, batchIndex: 0 } })
+    runner.poke('u1')
+    assert.ok(await waitFor(() => sent.length >= 1))
+    assert.doesNotMatch(sent[0].text, /\(\d\/\d\)/)
+    assert.doesNotMatch(sent[0].text, /办完了/)
+  } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})
+
+test('batch closes even when the last member is given up (mixed stats in closing line)', async () => {
+  const dbFile = path.join(os.tmpdir(), `runner-batchfail-${Date.now()}.db`)
+  const runs = new TaskRunStore({ file: dbFile })
+  const board = new AgentTaskStore({ file: dbFile })
+  const sent = []
+  const runner = new SubagentRunner({
+    agentFactory: async () => ({ respond: async (a) => {
+      if (a.text.includes('会失败')) throw new Error('402 litellm: 余额不足') // 不可重试 → 立即结清
+      return { text: 'ok' }
+    } }),
+    board, runs,
+    provider: { sendText: async (a) => { sent.push(a.text); return {} } },
+    contextTokens: { get: () => ({ contextToken: 't', providerBotId: 'b' }) },
+    maxConcurrentPerUser: 1, maxAutoAttempts: 3, timeoutMs: 60_000,
+  })
+  try {
+    board.create({ userId: 'u1', subject: '正常任务', description: '', metadata: { batchId: 'bx', batchSize: 2, batchIndex: 0 } })
+    board.create({ userId: 'u1', subject: '会失败的任务', description: '', metadata: { batchId: 'bx', batchSize: 2, batchIndex: 1 } })
+    runner.poke('u1')
+    assert.ok(await waitFor(() => sent.length === 2, 4000))
+    assert.match(sent[1], /1 件完成，1 件没做成/)
+  } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(dbFile, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})

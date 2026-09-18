@@ -26,3 +26,17 @@ test('session store persists full transcript and isolates users', () => {
     try { fs.rmSync(file, { force: true }) } catch (e) {}
   }
 })
+
+test('appendAssistant adds an assistant-only message (turn-pipeline S2) and keeps token estimate', () => {
+  const file = path.join(os.tmpdir(), `sess-aa-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
+  const store = new SessionStore({ file })
+  try {
+    store.append('u1', '你好', '你好呀')
+    const r = store.appendAssistant('u1', '☑️ 任务 #1 完成：导出好了')
+    assert.deepEqual(r.transcript.at(-1), { role: 'assistant', content: '☑️ 任务 #1 完成：导出好了' })
+    assert.equal(r.transcript.length, 3)
+    assert.ok(r.tokenEstimate > 0)
+    // 落盘可重读
+    assert.deepEqual(store.get('u1').transcript.at(-1), { role: 'assistant', content: '☑️ 任务 #1 完成：导出好了' })
+  } finally { store.close(); fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})

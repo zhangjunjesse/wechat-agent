@@ -276,6 +276,16 @@ export class AgentTaskStore {
     return released
   }
 
+  /** 同一批次（分诊一次落板的 plan）的全部任务（DESIGN-turn-pipeline：批次收尾
+   * 汇总的判定依据）。batchId 存在 metadata JSON 里，不动表结构。 */
+  listByBatch(userId, batchId) {
+    return this.#db.prepare(`
+      SELECT * FROM agent_tasks
+      WHERE user_id = ? AND json_extract(metadata, '$.batchId') = ?
+      ORDER BY id
+    `).all(String(userId), String(batchId)).map((r) => this.#map(r))
+  }
+
   /** 进行中任务的 activeForm（心跳文案内容化用）。 */
   activeForms(userId) {
     return this.#db.prepare("SELECT id, subject, active_form FROM agent_tasks WHERE user_id = ? AND status = 'in_progress' ORDER BY id").all(String(userId))
