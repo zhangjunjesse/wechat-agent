@@ -46,7 +46,7 @@ export class SessionStore {
     return { transcript: [...transcript], summary: cur.summary, tokenEstimate: estimateMessagesTokens(transcript) }
   }
 
-  /** Append one assistant-only message（DESIGN-turn-pipeline：后台任务的受理回执
+  /** Append one assistant-only message（ADR-0038：后台任务的受理回执
    * 之外，子任务完成/失败通知也是"用户看到的对话事实"，必须进 transcript，否则
    * 用户回一句"这个摘要不错"时主 agent 不知道指什么。纯同步（与 append 相同）：
    * node:sqlite 同步 API + 无 await，单线程下与其他写入不可能交错。 */

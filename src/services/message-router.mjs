@@ -65,7 +65,7 @@ export class MessageRouter {
     // the agent itself. Web chat calls agent.respond() with no channel at
     // all, so tools that need it degrade gracefully (see wechat-send-tools.mjs).
     const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
-    // 固定反馈管道（DESIGN-turn-pipeline / ADR-0038）：分诊为 task → 先发受理
+    // 固定反馈管道（ADR-0038）：分诊为 task → 先发受理
     // 回执（~3s），发送**成功后**才落板（时序规则：防子任务极快时"完成通知先于
     // 回执"）。分诊为 chat / 管道未装配 / 分诊内部失败 → 走下面的原路径，行为
     // 与管道上线前完全一致（route() 永不 throw）。

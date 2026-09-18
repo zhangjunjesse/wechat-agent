@@ -170,7 +170,7 @@ export class SubagentRunner {
     // 未到上限：中间静默（ADR-0035），下一轮 sweep 自动重挑
   }
 
-  /** 批次状态（DESIGN-turn-pipeline）：同一次分诊落板的 plan 共享 metadata.batchId。
+  /** 批次状态（ADR-0038）：同一次分诊落板的 plan 共享 metadata.batchId。
    * 通知带 (n/N) 进度；批内全部"尘埃落定"时，收尾说明合并进最后这条通知
    * （不另发一条，微信里少一条是一条）。"尘埃落定" = completed/deleted，或
    * pending 且退避次数已顶满（不会再自动重试）。 */
@@ -193,7 +193,7 @@ export class SubagentRunner {
     try {
       if (!run || !this.#runs.markNotified(run.id)) return // notified CAS：至多一次
       const target = this.#tokenFor(task.userId)
-      // S2（DESIGN-turn-pipeline）：这条通知是"用户看到的对话事实"，必须进
+      // S2（ADR-0038）：这条通知是"用户看到的对话事实"，必须进
       // transcript——否则用户回"这个摘要不错，再加一段"时主 agent 不知所指。
       // 无推送通道时也记（板上有结果，下轮对话该能引用它）。
       this.#sessions?.appendAssistant?.(task.userId, text)

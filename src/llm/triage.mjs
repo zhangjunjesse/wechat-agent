@@ -1,7 +1,7 @@
 import { JSON_RETRY_HINT } from '../services/failure-messaging.mjs'
 import { tryParseWithRepair } from '../services/json-repair.mjs'
 
-/** 分诊器（DESIGN-turn-pipeline / ADR-0038）——固定反馈管道的第一跳。
+/** 分诊器（ADR-0038）——固定反馈管道的第一跳。
  *
  * 职责边界（这是整个设计的立足点）：分诊器**只产出数据**（kind / ack 文案 /
  * plan 结构），所有"决定"——发不发回执、落不落板、走哪条路——都是调用方

@@ -276,7 +276,7 @@ export class AgentTaskStore {
     return released
   }
 
-  /** 同一批次（分诊一次落板的 plan）的全部任务（DESIGN-turn-pipeline：批次收尾
+  /** 同一批次（分诊一次落板的 plan）的全部任务（ADR-0038：批次收尾
    * 汇总的判定依据）。batchId 存在 metadata JSON 里，不动表结构。 */
   listByBatch(userId, batchId) {
     return this.#db.prepare(`

@@ -1,6 +1,6 @@
 import { logServerError } from './failure-messaging.mjs'
 
-/** 固定反馈管道（DESIGN-turn-pipeline / ADR-0038）。
+/** 固定反馈管道（ADR-0038）。
  *
  * 把"一条用户消息"的处理从单一黑盒 respond() 切成代码固定的两条路：
  *
