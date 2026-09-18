@@ -1,5 +1,6 @@
 import { assertInboundEvent } from '../contracts/bot-provider.mjs'
 import { createProgressNotifier } from './progress-notifier.mjs'
+import { friendlyChatErrorText, logServerError } from './failure-messaging.mjs'
 
 export class MessageRouter {
   #bindings
@@ -67,9 +68,13 @@ export class MessageRouter {
     try {
       reply = await this.#agent.respond({ userId: tenantKey, history, text: normalized.text || '用户发送了附件。', profile, channel, attachments: normalized.attachments || [] })
     } catch (error) {
-      // 失败必告知（不再静默——用户至少知道出了问题）
+      // 失败必告知（不再静默——用户至少知道出了问题），但**不再把异常原文发给
+      // 用户**（2026-09-18 事故：402 网关报错原文被当回复发出去）——完整错误
+      // 先落日志（排查用），用户只看到口语化的一句话（failure-messaging.mjs
+      // 统一收口，message-router/group-command-watcher 共用同一份判定与文案）。
       notifier.stop()
-      const msg = `⚠️ 处理出错了：${error?.message || error}\n可以再发一次，或换个说法；如果反复失败，请把这条错误发给我。`
+      logServerError('message-router', error, { userId: tenantKey })
+      const msg = friendlyChatErrorText(error)
       try { await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: msg, contextToken: normalized.contextToken }) } catch { /* 连错误都发不出则只能记日志 */ }
       throw error
     }

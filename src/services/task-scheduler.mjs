@@ -3,6 +3,7 @@ import path from 'node:path'
 import { nextRunAt } from './schedule.mjs'
 import { buildReportPrompt, parseReportJson, dedupeItems, renderReportPoster, renderPushText } from './daily-report.mjs'
 import { digestWindowDays, renderDigestPushText, renderQuietText } from './wechat-digest.mjs'
+import { isRetryableError, looksLikeRawJsonPayload, logServerError } from './failure-messaging.mjs'
 
 /** 定时任务调度器（DESIGN-timed-tasks.md + DESIGN-daily-report.md + ADR-0018 + ADR-0026）。
  *
@@ -207,10 +208,10 @@ export class TaskScheduler {
         if (r.ok) {
           for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, r.report.posterPath, this.#pushText(r.report)))
         } else {
-          const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+          const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
           for (const userId of plainUsers) results.push(await this.#fanoutReport(task, userId, '', text))
           results.push({ userId: `task-${task.id}`, error: r.error }) // 公共版失败可观测
-          if (!unitIsLast) nextPending.push({ userId: '', topic: '', attempts: unitAttemptNumber })
+          if (!giveUp) nextPending.push({ userId: '', topic: '', attempts: unitAttemptNumber })
         }
       } else {
         // ② 个性化版：每个 (用户, 主题) 各自单独生成一份（互不合并、互不串），
@@ -219,10 +220,10 @@ export class TaskScheduler {
         if (r.ok) {
           results.push(await this.#fanoutReport(task, unit.userId, r.report.posterPath, this.#pushText(r.report, [unit.topic])))
         } else {
-          const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+          const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
           results.push(await this.#fanoutReport(task, unit.userId, '', text))
           results.push({ userId: `task-${task.id}-${unit.userId}-${unit.topic}`, error: r.error }) // 个性化失败可观测（按主题定位）
-          if (!unitIsLast) nextPending.push({ userId: unit.userId, topic: unit.topic, attempts: unitAttemptNumber })
+          if (!giveUp) nextPending.push({ userId: unit.userId, topic: unit.topic, attempts: unitAttemptNumber })
         }
       }
     }
@@ -285,10 +286,10 @@ export class TaskScheduler {
         results.push(await this.#fanoutReport(task, unit.userId, r.report.posterPath, renderDigestPushText(r.report, { reportUrl: url })))
         continue
       }
-      const text = r.rawText || this.#failureText(task, unitAttemptNumber, unitIsLast)
+      const { text, giveUp } = this.#unitFailure(task, r, unitAttemptNumber, unitIsLast)
       results.push(await this.#fanoutReport(task, unit.userId, '', text))
       results.push({ userId: `task-${task.id}-${unit.userId}`, error: r.error }) // 可观测
-      if (!unitIsLast) nextPending.push({ userId: unit.userId, topic: '', attempts: unitAttemptNumber })
+      if (!giveUp) nextPending.push({ userId: unit.userId, topic: '', attempts: unitAttemptNumber })
     }
 
     this.#taskStore.setReportRetryUnits(task.id, nextPending)
@@ -305,6 +306,32 @@ export class TaskScheduler {
       return `【定时任务「${task.name}」】已重试 ${attemptNumber} 次仍失败，今天不再重试，明天按计划再试。`
     }
     return `【定时任务「${task.name}」】本次生成失败，系统会自动重试，无需操作。`
+  }
+
+  /** 不可重试错误（402 余额不足/401 鉴权/400 参数）的话术：不说"会自动重试"
+   * ——这是一个不会兑现的承诺，账户余额问题不会因为等 20 分钟再试就自己好
+   * （2026-09-18 事故的直接教训：402 被当成普通失败机械重试了 3 次）。 */
+  #nonRetryableFailureText(task) {
+    return `【定时任务「${task.name}」】本次生成遇到无法自动恢复的问题（比如账户余额或鉴权配置），今天不再重试，问题解决后下个周期会自动恢复正常推送。`
+  }
+
+  /** 单元失败时的推送文案 + 这个单元是否到此为止（不再排进重试）。
+   * 两条独立的整改（2026-09-18 事故，第 1/3 件事）都收在这里：
+   *   1. 绝不能把 `r.rawText` 原样当文案发出去——它是喂给 `parseReportJson`/
+   *      `parseDigestJson` 解析用的原始 LLM 输出，解析失败时**通常**就是一段
+   *      没收尾的 JSON（如 `{"focus":...,"items":[...]}`），而不是人话；只有
+   *      明显是自然语言（如"抱歉，今天没有合适的新闻"）时才展示它，否则一律
+   *      走标准失败话术（`looksLikeRawJsonPayload` 兜底判断）。
+   *   2. 错误分类决定要不要继续排重试（ADR-0026/0028 只有"重试/放弃"两态，
+   *      没有区分错误是否"重试也没用"）——不可重试错误立刻放弃，不占用
+   *      `retryMax` 配额，也不再对用户说一句不会兑现的"会自动重试"。 */
+  #unitFailure(task, r, unitAttemptNumber, unitIsLast) {
+    const rawText = String(r.rawText || '').trim()
+    const safeRaw = rawText && !looksLikeRawJsonPayload(rawText) ? rawText : ''
+    const retryable = isRetryableError({ message: r.error })
+    const giveUp = unitIsLast || !retryable
+    const text = safeRaw || (retryable ? this.#failureText(task, unitAttemptNumber, unitIsLast) : this.#nonRetryableFailureText(task))
+    return { text, giveUp }
   }
 
   /** 生成并入库一份报告（userId 为空 = 公共版；非空 = 该用户个性化版）。
@@ -339,6 +366,9 @@ export class TaskScheduler {
       }
       return { ok: true, report }
     } catch (error) {
+      // 完整错误（含 stack）落服务端日志——用户侧只会看到 #unitFailure 生成的
+      // 简短话术，排查还得靠这里（第 2/3 件事的落盘要求）。
+      logServerError('task-scheduler:generate', error, { taskId: task.id, userId, topic })
       return { ok: false, error: error.message || String(error), rawText: '' }
     }
   }
@@ -393,8 +423,12 @@ export class TaskScheduler {
       })
       text = typeof reply?.text === 'string' ? reply.text : String(reply ?? '')
     } catch (error) {
-      // 生成本身失败（LLM/工具异常，如生产实测的 402）：值得短间隔重试（ADR-0026）。
-      return { userId, error: error.message || String(error), retryable: true }
+      // 生成本身失败（LLM/工具异常）：值得短间隔重试（ADR-0026）——但**不是所有
+      // 失败都值得**（2026-09-18 事故教训）：402/401/400 这类账户/鉴权/参数问题
+      // 重试也没用，只会白烧 retryMax 次日志（failure-messaging.mjs 统一判定，
+      // 与报告/日报生成单元共用同一份分类）。
+      logServerError('task-scheduler:runForUser', error, { taskId: task.id, userId })
+      return { userId, error: error.message || String(error), retryable: isRetryableError(error) }
     }
     if (!text) return { userId, sent: true } // 生成成功但无输出：不算失败，不重试
     try {

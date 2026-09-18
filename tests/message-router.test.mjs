@@ -14,12 +14,14 @@ function setup({ agent, progress = { ackDelayMs: 5, intervalMs: 10_000 } } = {})
 
 const inbound = (text) => ({ providerBotId: 'bot-1', providerMessageId: `m-${text}`, providerUserId: 'wx-1', text, contextToken: 'tok-1' })
 
-test('a failing agent turn notifies the user instead of failing silently', async () => {
+test('a failing agent turn notifies the user instead of failing silently, without leaking the raw error', async () => {
+  // 2026-09-18 事故整改：用户不该看到 "402 litellm.APIError: ..." 这类原始报错——
+  // 只看到口语化的一句话，原始异常信息只进服务端日志（failure-messaging.mjs）。
   const { sent, router } = setup({ agent: { respond: async () => { throw new Error('boom: model exploded') } } })
   await assert.rejects(() => router.handleInbound(inbound('你好')), /boom/)
   const texts = sent.map((s) => s.text)
-  assert.ok(texts.some((t) => /处理出错了/.test(t)), `expected error notice, got: ${JSON.stringify(texts)}`)
-  assert.ok(texts.some((t) => /boom: model exploded/.test(t)))
+  assert.ok(texts.some((t) => /⚠️/.test(t)), `expected error notice, got: ${JSON.stringify(texts)}`)
+  assert.ok(texts.every((t) => !/boom: model exploded/.test(t)), '原始异常信息不应发给用户')
 })
 
 test('a slow turn gets an ack while working, then the result (long-task experience)', async () => {

@@ -293,8 +293,10 @@ test('poster image is sent before the short text; poster failure degrades to tex
 // 全部失败才放弃并如实告知"明天再来"。----
 
 test('report generation failure retries with backoff, then gives up for the day and settles', async () => {
+  // 用可重试错误（502 网关抖动）——402 这类不可重试错误已经不再走这条"重试到
+  // 耗尽"的路径，见下面 "non-retryable generation failure gives up immediately" 。
   let calls = 0
-  const agent = { respond: async () => { calls++; throw new Error('402 Insufficient Balance') } }
+  const agent = { respond: async () => { calls++; throw new Error('502 Bad Gateway') } }
   let nowMs = NOW
   const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
     agent, subscribers: { u1: 'tok-1' }, now: () => nowMs, retryMax: 2, retryIntervalMs: 1000,
@@ -341,6 +343,63 @@ test('report generation failure retries with backoff, then gives up for the day 
     await scheduler.sweep()
     assert.equal(calls, 3)
     assert.equal(sent.length, 3)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 2026-09-18 生产事故复盘：真实故障就是 402（账户余额不足），旧逻辑把它当成
+// 普通失败机械重试了 3 次——账户没充值之前，重试注定还是 402，纯粹烧日志、
+// 还每次都告诉用户"系统会自动重试"（一个不会兑现的承诺）。新逻辑：402/401/400
+// 这类不可重试错误第一次失败就放弃，不进 retry_units，话术也如实说明"不是
+// 等一等就能自动恢复的问题"。
+test('non-retryable generation failure (402) gives up immediately instead of burning retryMax', async () => {
+  let calls = 0
+  const agent = { respond: async () => { calls++; throw new Error('402 litellm.APIError - 账户余额不足或未开通套餐，请充值后使用') } }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({
+    agent, subscribers: { u1: 'tok-1' }, retryMax: 3, retryIntervalMs: 1000,
+  })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    assert.equal(calls, 1) // 只试了一次，没有为一个注定失败的错误再烧 2 次
+    const t = store.getTask('global-每日早报')
+    assert.ok(t.lastRunAt > 0) // 立刻结算，不进入"等 retryIntervalMs 再试"的循环
+    assert.equal(t.attemptCount, 0)
+    assert.deepEqual(t.retryUnits, [])
+    assert.equal(sent.length, 1)
+    assert.doesNotMatch(sent[0].text, /系统会自动重试/) // 不再承诺一个不会兑现的重试
+    assert.doesNotMatch(sent[0].text, /402/) // 不泄漏错误码/原文给用户
+    assert.doesNotMatch(sent[0].text, /litellm/i)
+    assert.match(sent[0].text, /无法自动恢复/)
+
+    // 充值恢复后，下一个自然周期（明天）会正常重新生成——不需要人工介入
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 0)
+  } finally {
+    store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 2026-09-18 生产事故复盘：用户收到的是一整段原始 JSON（`{"focus":...,
+// "items":[...]}`），根因是 report_unparsable 降级路径把 r.rawText 原样当
+// 推送文案发了出去——而 rawText 本来就是喂给 parseReportJson 解析、不是给人看
+// 的。只有"人话"（如道歉语，见上面 "unparsable report degrades to raw text
+// push" 那个既有测试）才展示 rawText，结构化 JSON 一律换成标准失败话术。
+test('unparsable report whose raw text still looks like JSON never leaks the JSON to the user', async () => {
+  // 模拟"有条目但全部因校验失败被丢弃"导致 parseReportJson 判 !ok，但原始输出
+  // 仍是一段完整、可读的 JSON（正是用户实际收到的那种内容）。
+  const rawJson = JSON.stringify({ focus: 'AI安全成焦点：OpenAI等巨头秘密联手制定安全框架', items: [{ title: 'x'.repeat(200), summary: '超长标题会被丢弃' }] })
+  const agent = { respond: async () => ({ text: rawJson }) }
+  const { file, root, store, reportStore, scheduler, sent, profiles } = setupReport({ agent, subscribers: { u1: 'tok-1' } })
+  try {
+    profiles.set('u1', { userId: 'u1', nickname: 'u1', wxid: 'w', ilinkUserId: 'u1' })
+    await scheduler.sweep()
+    assert.equal(sent.length, 1)
+    assert.doesNotMatch(sent[0].text, /"focus"/)
+    assert.doesNotMatch(sent[0].text, /"items"/)
+    assert.doesNotMatch(sent[0].text, /AI安全成焦点/)
+    assert.match(sent[0].text, /系统会自动重试|已重试.*仍失败/) // 走标准失败话术
+    assert.equal(reportStore.listReports('global-每日早报', 5).length, 0)
   } finally {
     store?.close?.(); reportStore?.close?.(); fs.rmSync(file, { force: true }); fs.rmSync(file + '.rep.db', { force: true }); fs.rmSync(root, { recursive: true, force: true })
   }

@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { createProgressNotifier } from './progress-notifier.mjs'
 import { parseAttachment } from './wechat-log-store.mjs'
 import { beijingDateTimeStr } from './time.mjs'
+import { friendlyChatErrorText, logServerError } from './failure-messaging.mjs'
 
 /** 群命令监听器（群聊入口：收走 wechat-sync，发走 iLink 私聊）。
  *
@@ -185,8 +186,11 @@ export class GroupCommandWatcher {
         channel: { type: 'ilink', providerBotId: cached.providerBotId, toProviderUserId: ilinkId, contextToken: cached.contextToken },
       })
     } catch (error) {
+      // 与 message-router.mjs 共用同一份收口逻辑（failure-messaging.mjs）：
+      // 不把异常原文发给用户，完整错误落服务端日志。
       notifier.stop()
-      await push(`⚠️ 处理出错了：${error?.message || error}\n可以再试一次；如果反复失败，请把这条错误发我。`)
+      logServerError('group-command-watcher', error, { userId })
+      await push(friendlyChatErrorText(error))
       throw error
     }
     notifier.stop()
