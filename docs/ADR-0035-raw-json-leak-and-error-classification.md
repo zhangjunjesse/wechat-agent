@@ -21,7 +21,13 @@
 
 | # | 根因 | 位置 |
 |---|---|---|
-| A | **`report_unparsable`/`digest_unparsable` 降级路径把 `r.rawText` 原样当推送文案发出去** ——`r.rawText` 是喂给 `parseReportJson`/`parseDigestJson` 解析用的原始 LLM 输出；解析失败时它通常是一段没收尾/校验不过的结构化 JSON（如本次事故：8 条新闻里全部因标题超长/字段缺失被 `parseReportJson` 丢弃，`items.length === 0` 触发 `{ ok:false, error:'report_unparsable', rawText }`），不是"模型说的一句人话"。旧代码 `const text = r.rawText \|\| this.#failureText(...)` 只要 `rawText` 非空就无条件展示，没有区分"这是道歉语"还是"这是半成品 JSON"。 | `src/services/task-scheduler.mjs`（改动前）行 210 / 222 / 288（`#runReportTask` 公共版分支、个性化分支、`#runDigestTask`） |
+| A | **`report_unparsable`/`digest_unparsable` 降级路径把 `r.rawText` 原样当推送文案发出去** ——`r.rawText` 是喂给 `parseReportJson`/`parseDigestJson` 解析用的原始 LLM 输出；解析失败时它通常是一段结构化 JSON 而不是"模型说的一句人话"。
+
+**本次事故的确切触发原因（实测复现，不是推断）**：模型产出的 JSON 里有一条标题含**未转义的双引号**——`"title":"Anthropic把Claude Cowork与chat合并为"一个Claude""`——`JSON.parse` 在 position 70 抛 `Expected ',' or '}' after property value`，`parseReportJson` 走 `catch { return { ok: false } }`（`src/services/daily-report.mjs:62`）直接返回，**根本没走到条目级校验**。
+
+（复现方式：把用户实际收到的那段 payload 原样喂给 `JSON.parse` 即可。）
+
+注意**不是**"标题超长被丢弃"——`daily-report.mjs:72` 的 `title.length > 120` 那条规则本次没有触发，用户收到的 7 条标题都只有 20–30 字。最初的排查结论写错过这一点，此处更正，避免后人误去调标题长度上限。旧代码 `const text = r.rawText \|\| this.#failureText(...)` 只要 `rawText` 非空就无条件展示，没有区分"这是道歉语"还是"这是半成品 JSON"。 | `src/services/task-scheduler.mjs`（改动前）行 210 / 222 / 288（`#runReportTask` 公共版分支、个性化分支、`#runDigestTask`） |
 | B | **`agent.respond()` 抛出的异常被原样拼进用户可见回复** ——`⚠️ 处理出错了：${error?.message \|\| error}`，用户直接看到 `402 litellm.APIError: ...` 这类技术报错原文。 | `src/services/message-router.mjs`（改动前）行 72；`src/services/group-command-watcher.mjs`（改动前）行 189（同一份反模式在两处独立复制） |
 | C | **重试机制不分错误类型，402/401/400 这类"重试也没用"的错误被当成普通失败机械重试** ——ADR-0026/0028 的重试判定只有"失败 → 值得重试"一档，没有"这个失败重试还是原样失败"的判断；402（账户余额问题）在充值之前重试 3 次必然还是 402，纯粹烧 `retryMax` 配额和日志，且每次都告诉用户"系统会自动重试"——一个不会兑现的承诺。 | `src/services/task-scheduler.mjs`（改动前）`#runReportTask`/`#runDigestTask` 的 `if (!unitIsLast) nextPending.push(...)`（无错误分类）、`#runForUser` 行 427（`retryable: true` 硬编码，不看错误类型） |
 
@@ -131,8 +137,8 @@ degrades to raw text push` 保留原行为不变），否则一律走 `#failureT
     直接复现本次事故的错误文案，断言只调用一次 LLM、立刻结算、不进
     `retry_units`、用户收到的文案不含 `402`/`litellm`/"系统会自动重试"。
   - 新增 `unparsable report whose raw text still looks like JSON never
-    leaks the JSON to the user`：直接复现事故里"标题超长导致条目被丢弃、
-    `items` 变空但原始输出仍是完整 JSON"的场景，断言推送文案不含
+    leaks the JSON to the user`：复现事故形态——解析失败（本次是标题里的
+    未转义双引号让 `JSON.parse` 抛错）但原始输出仍是一段 JSON——断言推送文案不含
     `"focus"`/`"items"`/原始 focus 内容。
   - 既有 `unparsable report degrades to raw text push` 测试（模型道歉语场景）
     未改一字，原样通过——确认"人话仍然透传"的行为没有回归。
