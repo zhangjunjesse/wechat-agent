@@ -12,8 +12,9 @@ export class MessageRouter {
   #requireVerified
   #contextTokens
   #progress
+  #boardStore
 
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = {} }) {
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = {}, boardStore = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
@@ -22,6 +23,7 @@ export class MessageRouter {
     this.#requireVerified = requireVerified
     this.#contextTokens = contextTokens
     this.#progress = progress
+    this.#boardStore = boardStore
   }
 
   async handleInbound(event) {
@@ -58,9 +60,20 @@ export class MessageRouter {
     const channel = { type: 'ilink', providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, contextToken: normalized.contextToken }
     // 长任务体验：8 秒未完成先 ack，之后每 40 秒心跳（避免用户干等无感知）。
     // 发送用最新 token（长任务期间可能刷新）。
+    // 心跳内容化（DESIGN-agent-task-board §3.6）：板上有进行中任务时，心跳带
+    // 它们的 activeForm（"正在导出季度总结"）而不只是"仍在处理中"。
+    const heartbeatText = this.#boardStore
+      ? (n, minutes) => {
+          const forms = safeActiveForms(this.#boardStore, tenantKey)
+          return forms.length
+            ? `⏳ 仍在处理中（已约 ${minutes} 分钟）：${forms.slice(0, 2).join('；')}…`
+            : `⏳ 仍在处理中（已约 ${minutes} 分钟），请稍候…`
+        }
+      : undefined
     const notifier = createProgressNotifier({
       provider: this.#provider,
       channel: { ...channel, contextToken: this.#contextTokens?.get(normalized.providerUserId)?.contextToken || normalized.contextToken },
+      ...(heartbeatText ? { heartbeatText } : {}),
       ...this.#progress,
     })
     notifier.start()
@@ -90,4 +103,9 @@ export class MessageRouter {
     const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: sendToken })
     return { accepted: true, duplicate: false, providerMessageId: sent.providerMessageId, text: reply.text }
   }
+}
+
+/** 板查询失败不能连累心跳（心跳本身已是"失败不影响主流程"的层）。 */
+function safeActiveForms(boardStore, userId) {
+  try { return (boardStore.activeForms(userId) || []).map((f) => f.text).filter(Boolean) } catch { return [] }
 }

@@ -132,3 +132,43 @@ test('ids continue after reopening the store', () => {
     fs.rmSync(file, { force: true })
   }
 })
+
+test('failOrphans marks leftover pending/running as failed-retryable; terminal rows untouched (A6)', () => {
+  const { file, store } = setup()
+  try {
+    const a = store.create({ userId: 'u1', goal: 'a' })            // pending
+    const b = store.create({ userId: 'u1', goal: 'b' })
+    store.markRunning(b.id)                                        // running
+    const c = store.create({ userId: 'u1', goal: 'c' })
+    store.markRunning(c.id)
+    store.settle(c.id, { status: 'done', result: 'ok' })           // terminal
+    const n = store.failOrphans()
+    assert.equal(n, 2)
+    assert.equal(store.get(a.id).status, 'failed')
+    assert.match(store.get(a.id).error, /进程重启中断/)
+    assert.equal(store.get(b.id).status, 'failed')
+    assert.equal(store.get(c.id).status, 'done', '终态不动')
+    // 孤儿行可被人工重试（markRetry 只认终态——failOrphans 后满足）
+    assert.equal(store.markRetry(a.id).status, 'pending')
+  } finally {
+    store.close(); fs.rmSync(file, { force: true })
+  }
+})
+
+test('board_task_id column migrates on existing DBs and latestForBoard picks the newest run', () => {
+  const { file, store } = setup()
+  try {
+    store.create({ userId: 'u1', goal: 'g1', boardTaskId: '7', createdAt: 1000 })
+    const r2 = store.create({ userId: 'u1', goal: 'g2', boardTaskId: '7', createdAt: 2000 })
+    store.create({ userId: 'u1', goal: 'other', boardTaskId: '8', createdAt: 3000 })
+    assert.equal(store.latestForBoard('7').id, r2.id)
+    assert.equal(store.get(r2.id).boardTaskId, '7')
+    // 重开（触发 ALTER 的幂等分支）不丢数据
+    store.close()
+    const reopened = new TaskRunStore({ file })
+    assert.equal(reopened.latestForBoard('7').id, r2.id)
+    reopened.close()
+  } finally {
+    fs.rmSync(file, { force: true })
+  }
+})

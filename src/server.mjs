@@ -27,6 +27,7 @@ import { LarkTokenStore } from './services/lark-token-store.mjs'
 import { LarkClient } from './services/lark-client.mjs'
 import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
 import { TaskRunStore } from './services/task-run-store.mjs'
+import { AgentTaskStore } from './services/agent-task-store.mjs'
 import { SubagentRunner } from './services/subagent-runner.mjs'
 import { VisionClient } from './services/vision-client.mjs'
 import { GroupProfileStore } from './services/group-profile-store.mjs'
@@ -157,28 +158,39 @@ const agent = defaultAgent
   ? new ModelRoutingAgent({ defaultAgent, expertAgent, store: expertModeStore, ttlMs: expertModeTtlMs })
   : undefined
 
-// 任务委派（DESIGN-task-delegation.md / ADR-0024）：
-// 主 agent 只决策与秒回；长任务交给后台子 agent（独立实例 + 独立 thinking 缓存，
-// 受限工具集：无 delegate/task 工具防递归，保留 send_file/notify_user 与业务工具）。
-const taskRunStore = new TaskRunStore({ file: process.env.TASK_RUNS_FILE || 'data/task-runs.db' })
+// Agent 任务板（DESIGN-agent-task-board.md，前身 ADR-0024 任务委派）：
+// 承诺层（agent_tasks，板）与执行层（task_runs，单次尝试）分离，同一个 DB 文件。
+// 主 agent 只决策与秒回；板上任务由 drain 循环交给后台子 agent（独立实例 +
+// 独立 thinking 缓存，受限工具集：无任务板工具防递归，保留 send_file/notify_user
+// 与业务工具）。板即队列 → 进程重启后 recover() 释放死认领，任务不悬挂。
+const taskRunsFile = process.env.TASK_RUNS_FILE || 'data/task-runs.db'
+const taskRunStore = new TaskRunStore({ file: taskRunsFile })
+const boardStore = new AgentTaskStore({ file: taskRunsFile })
+// 启动期孤儿清理：上一个进程遗留的 pending/running 执行行如实标 failed，
+// 终结"已用 N 秒永远涨"的假象（必须在 runner.start() 之前）。
+const orphaned = taskRunStore.failOrphans()
+if (orphaned) console.log(`task runs: ${orphaned} orphaned run(s) from previous process marked failed`)
 const subagentTools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore: null, reportStore: null, lark, vision })
 const makeSubagent = () => process.env.OPENAI_API_KEY
   ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools: subagentTools, skillRegistry })
   : null
 const subagentRunner = agent ? new SubagentRunner({
   agentFactory: makeSubagent,
-  store: taskRunStore,
+  board: boardStore,
+  runs: taskRunStore,
   provider,
   contextTokens,
   profileStore,
   maxConcurrentPerUser: Number(process.env.DELEGATE_MAX_CONCURRENT || 2),
   timeoutMs: Number(process.env.DELEGATE_TIMEOUT_MS || 300_000),
-  onError: (error, task) => console.warn(`subagent ${task?.id || '?'} notify failed: ${error?.message || error}`),
+  maxAutoAttempts: Number(process.env.BOARD_MAX_AUTO_ATTEMPTS || 3),
+  onError: (error, task) => console.warn(`subagent board#${task?.id || '?'} notify failed: ${error?.message || error}`),
 }) : null
 if (subagentRunner) {
-  const { delegateTools } = await import('./tools/delegate-tools.mjs')
-  const dt = delegateTools({ taskRunStore, runner: subagentRunner })
-  tools.push(dt.delegateTask, dt.listTasks, dt.taskStatus, dt.retryTask)
+  const { taskBoardTools } = await import('./tools/task-board-tools.mjs')
+  const bt = taskBoardTools({ board: boardStore, runs: taskRunStore, runner: subagentRunner })
+  tools.push(bt.taskCreate, bt.taskList, bt.taskGet, bt.taskUpdate, bt.taskOutput)
+  subagentRunner.start()
 }
 
 // Timed tasks: scheduler pushes task outputs to each user's WeChat when due.
@@ -242,10 +254,10 @@ groupWatcher?.start()
 
 // `taskStore` 进 createApp 是为了 ADR-0031 的"核验通过即默认订阅"——VerificationService
 // 的 onVerified 钩子此前一直没人接，现在由 createApp 内部接上。
-const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark, taskStore })
+const app = createApp({ provider, store, verifier, profileStore, agent, downloadTokens, userFilesRoot, contextTokens, reportStore, lark, taskStore, boardStore })
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '127.0.0.1'
 await listen(app, { port, host })
 console.log(`wechat-agent listening on http://${host}:${port}`)
-process.on('SIGTERM', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })
-process.on('SIGINT', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })
+process.on('SIGTERM', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); subagentRunner?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })
+process.on('SIGINT', () => { scheduler?.stop(); groupWatcher?.stop(); memoryMaintenance?.stop(); subagentRunner?.stop(); contextTokens.flush(); groupProfiles.close(); process.exit(0) })

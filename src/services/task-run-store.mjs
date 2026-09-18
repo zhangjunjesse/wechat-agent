@@ -39,20 +39,41 @@ export class TaskRunStore {
       );
       CREATE INDEX IF NOT EXISTS idx_task_runs_user ON task_runs (user_id, created_at DESC);
     `)
+    // 迁移（DESIGN-agent-task-board）：执行行关联到板任务。旧库无此列 → 补上；
+    // 已有则 ALTER 报 duplicate column，吞掉即可（幂等）。
+    try { this.#db.exec("ALTER TABLE task_runs ADD COLUMN board_task_id TEXT NOT NULL DEFAULT ''") } catch { /* 已迁移 */ }
     // 序号从现有最大值续（id 形如 task-12）
     const row = this.#db.prepare("SELECT id FROM task_runs WHERE id LIKE 'task-%' ORDER BY CAST(SUBSTR(id, 6) AS INTEGER) DESC LIMIT 1").get()
     this.#seq = row ? Number(String(row.id).slice(5)) || 0 : 0
   }
 
-  /** 建任务（pending）。goal 由主 agent 写成自包含描述。 */
-  create({ userId, goal, context = '', origin = '', createdAt = Date.now() }) {
+  /** 建执行行（pending）。goal 由主 agent/板任务写成自包含描述；
+   * boardTaskId 非空 = 这次执行隶属于板上某个承诺（DESIGN-agent-task-board）。 */
+  create({ userId, goal, context = '', origin = '', boardTaskId = '', createdAt = Date.now() }) {
     this.#seq += 1
     const id = `task-${this.#seq}`
     this.#db.prepare(`
-      INSERT INTO task_runs (id, user_id, origin, goal, context, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?)
-    `).run(id, String(userId), String(origin || ''), String(goal), String(context || ''), Math.floor(createdAt))
+      INSERT INTO task_runs (id, user_id, origin, goal, context, status, board_task_id, created_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(id, String(userId), String(origin || ''), String(goal), String(context || ''), String(boardTaskId || ''), Math.floor(createdAt))
     return this.get(id)
+  }
+
+  /** 某个板任务的最近一次执行（task_output 的默认取数路径）。 */
+  latestForBoard(boardTaskId) {
+    const row = this.#db.prepare('SELECT * FROM task_runs WHERE board_task_id = ? ORDER BY created_at DESC LIMIT 1').get(String(boardTaskId))
+    return row ? this.#map(row) : null
+  }
+
+  /** 启动期孤儿清理（DESIGN-agent-task-board §3.5）：执行队列是内存的，进程
+   * 重启后所有 pending/running 行都不再有人执行——如实标 failed（可重试），
+   * 终结"task_status 显示已用 N 秒且永远涨"的假象。必须在 runner 启动前调用。 */
+  failOrphans({ now = Date.now() } = {}) {
+    const info = this.#db.prepare(`
+      UPDATE task_runs SET status = 'failed', error = '进程重启中断，可重试', finished_at = ?
+      WHERE status IN ('pending','running')
+    `).run(Math.floor(now))
+    return Number(info.changes || 0)
   }
 
   markRunning(id, atMs = Date.now()) {
@@ -147,6 +168,7 @@ export class TaskRunStore {
       id: row.id,
       userId: row.user_id,
       origin: row.origin || '',
+      boardTaskId: row.board_task_id || '',
       goal: row.goal,
       context: row.context || '',
       status: row.status,

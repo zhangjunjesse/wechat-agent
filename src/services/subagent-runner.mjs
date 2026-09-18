@@ -1,126 +1,182 @@
-/** 子 agent 后台执行器（DESIGN-task-delegation.md / ADR-0024）。
+import { isRetryableError, logServerError } from './failure-messaging.mjs'
+
+/** 板驱动的后台执行器（DESIGN-agent-task-board.md；前身 ADR-0024 的队列版）。
  *
- * 主 agent 调 delegate_task 后立即返回，真正的执行在这里异步进行：
+ * 与 ADR-0024 版的关键差异：**板即队列**。不再持有内存 `#queue`（那正是"进程
+ * 重启任务悬挂"的根源）——执行目标从 `agent_tasks` 里现挑（可认领 = pending ∧
+ * 无 owner ∧ 无未完成 blocker），认领用 CAS，进程里只留"正在跑什么"的瞬时计数。
+ * 重启后什么都不用恢复：recover() 把死 owner 的 in_progress 释放回 pending，
+ * 下一轮 drain 自然接上。
  *
- *   队列（每用户并发上限）→ 建**独立** AgentsSdkAgent 实例 → respond(goal)
- *   → 结算（首次结果优先）→ **无条件通知用户**（成功/失败/超时都通知）
+ * 保留自 ADR-0024（原样复用）：独立 agent 实例（thinking 缓存隔离）、
+ * ephemeral 执行（不写用户会话/记忆）、每用户并发上限、结算通知走 run 行的
+ * `notified` CAS（至多一次）、无抢占（超时只结算不硬杀）。
  *
- * 关键设计（来自 DSH 研究，见 docs/research-dsh-subagent.md / -jobs.md）：
- *   - **独立 agent 实例**：子 agent 各自持有 wrapClientForDeepSeek 包装的 client 与
- *     串行队列，避免与主 agent 争 thinking 缓存（否则 DeepSeek 400）；
- *   - **上下文隔离**：goal + 可选 context 摘要，不带主对话历史（spawn 语义）；
- *     `ephemeral: true` 执行 —— 不写用户的 session/记忆；
- *   - **受限工具集**：不含 delegate/task 工具（防递归），保留 send_file/notify_user
- *     与业务工具（子 agent 需自己交付文件、汇报进度）；
- *   - **结算通知无条件投递**（DSH 结论：最需要说明结局的正是子级没机会开口的情形），
- *     且在释放并发位**之前**发出；`notified` 位保证只发一次；
- *   - **无抢占**：超时只结算为 timeout 并通知，不硬杀（子 run 自行结束）。
- */
+ * 失败双轨（ADR-0035 分类落到板上）：
+ *   - 可重试（超时/限流/网络）→ 释放回 pending + auto_attempts+1，**中间静默**；
+ *     攒满 maxAutoAttempts 才通知一次"没做成"。
+ *   - 不可重试（402/401/400）→ 释放且 auto_attempts 直接顶到上限（不再自动
+ *     重挑），立即如实通知一次，不承诺重试。
+ *   - 通知文案不含任何原始报错/错误码——完整错误进服务端日志。 */
 export class SubagentRunner {
   #agentFactory
-  #store
+  #board
+  #runs
   #provider
   #contextTokens
   #profileStore
   #maxConcurrentPerUser
   #timeoutMs
-  #queue = []
-  #running = new Map() // userId -> count
+  #maxAutoAttempts
+  #retryBackoffMs
+  #mainStaleMs
+  #sweepIntervalMs
+  #running = new Map() // userId -> count（本进程瞬时并发，不是权威状态）
+  #liveOwners = new Set()
+  #ownerSeq = 0
+  #instanceId
+  #timer = null
   #onError
 
-  constructor({ agentFactory, store, provider, contextTokens, profileStore = null, maxConcurrentPerUser = 2, timeoutMs = 300_000, onError = null }) {
+  constructor({ agentFactory, board, runs, provider, contextTokens, profileStore = null, maxConcurrentPerUser = 2, timeoutMs = 300_000, maxAutoAttempts = 3, retryBackoffMs = 60_000, mainStaleMs = 10 * 60_000, sweepIntervalMs = 30_000, onError = null }) {
     if (typeof agentFactory !== 'function') throw new TypeError('agentFactory is required')
+    if (!board) throw new TypeError('board (AgentTaskStore) is required')
     this.#agentFactory = agentFactory
-    this.#store = store
+    this.#board = board
+    this.#runs = runs
     this.#provider = provider
     this.#contextTokens = contextTokens
     this.#profileStore = profileStore
     this.#maxConcurrentPerUser = Math.max(1, Number(maxConcurrentPerUser) || 2)
-    // 超时：正值即生效（生产默认 300s，由 env DELEGATE_TIMEOUT_MS 配置；不设硬下限以便测试）
     this.#timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 300_000
+    this.#maxAutoAttempts = Math.max(1, Number(maxAutoAttempts) || 3)
+    this.#retryBackoffMs = Number(retryBackoffMs) >= 0 ? Number(retryBackoffMs) : 60_000
+    this.#mainStaleMs = Number(mainStaleMs) > 0 ? Number(mainStaleMs) : 10 * 60_000
+    this.#sweepIntervalMs = Number(sweepIntervalMs) > 0 ? Number(sweepIntervalMs) : 30_000
+    this.#instanceId = `${process.pid}-${Date.now().toString(36)}`
     this.#onError = onError
   }
 
-  /** 入队（立即返回，不等待执行）。 */
-  enqueue({ taskId, userId, profile = null, channel = null }) {
-    this.#queue.push({ taskId, userId, profile, channel })
-    queueMicrotask(() => { void this.#drain() })
-    return true
+  /** 启动：先恢复（释放死 owner），再全量 drain，然后周期扫描。 */
+  start() {
+    if (this.#timer) return
+    this.recover()
+    this.drainAll()
+    this.#timer = setInterval(() => { this.recover(); this.drainAll() }, this.#sweepIntervalMs)
+    this.#timer.unref?.()
   }
 
-  /** 处理队列：为每个用户维持并发上限。 */
-  async #drain() {
-    for (let i = 0; i < this.#queue.length; i++) {
-      const item = this.#queue[i]
-      const running = this.#running.get(item.userId) || 0
-      if (running >= this.#maxConcurrentPerUser) continue // 该用户已达并发上限，排队等待
-      this.#queue.splice(i, 1)
-      i -= 1
-      this.#running.set(item.userId, running + 1)
-      void this.#run(item).finally(() => {
-        const left = (this.#running.get(item.userId) || 1) - 1
-        if (left <= 0) this.#running.delete(item.userId)
-        else this.#running.set(item.userId, left)
-        queueMicrotask(() => { void this.#drain() }) // 释放位置后继续排后续任务
+  stop() {
+    if (this.#timer) { clearInterval(this.#timer); this.#timer = null }
+  }
+
+  /** 恢复扫描（幂等）：释放不再活着的认领。
+   *  - worker 认领：owner 不在本进程 live 集合 → 上一个进程的遗留，释放；
+   *  - main 认领（主 agent 当场做）：应在一轮对话内完成，超过 mainStaleMs 视为
+   *    中断，释放回 pending。释放不占退避预算（重启不是任务的错）。 */
+  recover(now = Date.now()) {
+    return this.#board.recoverStale({
+      now,
+      shouldRelease: (task) => task.owner === 'main'
+        ? now - task.updatedAt > this.#mainStaleMs
+        : !this.#liveOwners.has(task.owner),
+    })
+  }
+
+  /** 某用户有新可认领任务时的即时触发（task_create/task_update 调）。 */
+  poke(userId) {
+    queueMicrotask(() => { void this.#drain(String(userId)) })
+  }
+
+  drainAll(now = Date.now()) {
+    for (const userId of this.#board.usersWithClaimable({ maxAutoAttempts: this.#maxAutoAttempts, retryBackoffMs: this.#retryBackoffMs, now })) {
+      void this.#drain(userId, now)
+    }
+  }
+
+  async #drain(userId, now = Date.now()) {
+    for (;;) {
+      const running = this.#running.get(userId) || 0
+      if (running >= this.#maxConcurrentPerUser) return
+      const next = this.#board.nextClaimable(userId, { maxAutoAttempts: this.#maxAutoAttempts, retryBackoffMs: this.#retryBackoffMs, now })
+      if (!next) return
+      this.#ownerSeq += 1
+      const owner = `worker:${this.#instanceId}:${this.#ownerSeq}`
+      const claimed = this.#board.claim(next.id, owner)
+      if (!claimed) continue // 被别的 drain 抢走：挑下一个
+      this.#running.set(userId, running + 1)
+      this.#liveOwners.add(owner)
+      void this.#execute(claimed, owner).finally(() => {
+        this.#liveOwners.delete(owner)
+        const left = (this.#running.get(userId) || 1) - 1
+        if (left <= 0) this.#running.delete(userId)
+        else this.#running.set(userId, left)
+        this.poke(userId) // 释放并发位后继续挑
       })
     }
   }
 
-  async #run({ taskId, userId, profile, channel }) {
-    const task = this.#store.get(taskId)
-    if (!task) return
-    this.#store.markRunning(taskId)
-    const startedAt = Date.now()
+  async #execute(task, owner) {
+    const run = this.#runs.create({ userId: task.userId, goal: `${task.subject}\n${task.description}`.trim(), boardTaskId: String(task.id), origin: 'board' })
+    this.#runs.markRunning(run.id)
     let outcome = { status: 'failed', result: '', error: '' }
     try {
       const agent = await this.#agentFactory()
-      const prompt = buildSubagentPrompt(task)
-      const runUserId = `subagent:${taskId}`
-      const execProfile = profile || (this.#profileStore ? await this.#profileStore.get(userId) : null) || { nickname: '任务执行', wxid: runUserId }
+      const prompt = buildSubagentPrompt({ runId: run.id, boardId: task.id, subject: task.subject, description: task.description })
+      const execProfile = (this.#profileStore ? await this.#profileStore.get(task.userId) : null) || { nickname: '任务执行', wxid: `subagent:${run.id}` }
       const timeout = new Promise((resolve) => {
         const t = setTimeout(() => resolve({ timedOut: true }), this.#timeoutMs)
         t.unref?.()
       })
       const reply = await Promise.race([
-        agent.respond({ userId: runUserId, text: prompt, profile: execProfile, channel, ephemeral: true }).then((r) => ({ r })),
+        agent.respond({ userId: `subagent:${run.id}`, text: prompt, profile: execProfile, ephemeral: true }).then((r) => ({ r })),
         timeout,
       ])
       if (!reply || reply.timedOut) {
         outcome = { status: 'timeout', result: '', error: `超过 ${Math.round(this.#timeoutMs / 1000)} 秒未完成` }
       } else {
         const text = typeof reply.r?.text === 'string' ? reply.r.text : String(reply.r ?? '')
-        // 子 agent 若已用 send_file 交付文件，这里只记录文本；文件交付由子 agent 自己完成
         outcome = text ? { status: 'done', result: text, error: '' } : { status: 'failed', result: '', error: '子任务没有产出任何内容' }
       }
     } catch (error) {
       outcome = { status: 'failed', result: '', error: error?.message || String(error) }
-    } finally {
-      const elapsed = Math.round((Date.now() - startedAt) / 1000)
-      const settled = this.#store.settle(taskId, { ...outcome, atMs: Date.now() })
-      // 结算通知：无条件（成功/失败/超时都告知），且在释放并发位之前
-      try {
-        await this.#notify(settled, { userId, channel, elapsed })
-      } catch (error) {
-        this.#onError?.(error, settled)
-      }
     }
+    const settledRun = this.#runs.settle(run.id, { ...outcome, atMs: Date.now() })
+
+    // ---- 板侧结算 ----
+    const fresh = this.#board.get(task.id)
+    if (!fresh || fresh.status === 'deleted') return // cancel 语义：结果作废、零通知（A7）
+
+    if (outcome.status === 'done') {
+      this.#board.complete(task.id, { result: outcome.result })
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'done', result: outcome.result }))
+      return
+    }
+
+    // 失败：分类决定退避与话术（错误原文只进日志，永不进用户消息）
+    logServerError('subagent-runner', new Error(outcome.error), { boardId: task.id, runId: run.id, userId: task.userId })
+    const retryable = outcome.status === 'timeout' || isRetryableError(outcome.error)
+    if (!retryable) {
+      this.#board.release(task.id, { error: outcome.error, setAutoAttempts: this.#maxAutoAttempts })
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'nonRetryable' }))
+      return
+    }
+    const released = this.#board.release(task.id, { error: outcome.error, countAttempt: true })
+    if (released && released.autoAttempts >= this.#maxAutoAttempts) {
+      await this.#safeNotify(settledRun, task, renderSettlementText({ boardId: task.id, subject: task.subject, kind: 'gaveUp' }))
+    }
+    // 未到上限：中间静默（ADR-0035），下一轮 sweep 自动重挑
   }
 
-  /** 把结算结果推给用户（`notified` 位保证只发一次）。 */
-  async #notify(task, { userId, channel }) {
-    if (!task) return
-    if (!this.#store.markNotified(task.id)) return // 已被通知过（重试/重复结算）
-    const text = renderSettlementText(task)
-    const target = channel && channel.contextToken
-      ? channel
-      : this.#tokenFor(userId)
-    if (!target) return // 无推送通道：记录已由 store 保留，用户下次问起可查
-    await this.#provider.sendText({
-      providerBotId: target.providerBotId,
-      toProviderUserId: target.toProviderUserId,
-      contextToken: target.contextToken,
-      text,
-    })
+  async #safeNotify(run, task, text) {
+    try {
+      if (!run || !this.#runs.markNotified(run.id)) return // notified CAS：至多一次
+      const target = this.#tokenFor(task.userId)
+      if (!target) return
+      await this.#provider.sendText({ providerBotId: target.providerBotId, toProviderUserId: target.toProviderUserId, contextToken: target.contextToken, text })
+    } catch (error) {
+      this.#onError?.(error, task)
+    }
   }
 
   #tokenFor(userId) {
@@ -130,37 +186,31 @@ export class SubagentRunner {
   }
 }
 
-/** 子 agent 的任务提示：自包含 + 交付要求（子 agent 看不到主对话）。 */
-export function buildSubagentPrompt(task) {
+/** 子 agent 的任务提示：自包含 + 交付要求（子 agent 看不到主对话、也没有任务板工具）。 */
+export function buildSubagentPrompt({ runId, boardId, subject, description = '' }) {
   return [
-    `【后台任务 ${task.id}】你是被主助手派出来的执行子 agent，**看不到与用户的对话历史**，只依据下面的任务描述工作。`,
+    `【后台任务 #${boardId}（执行 ${runId}）】你是被主助手派出来的执行子 agent，**看不到与用户的对话历史**，只依据下面的任务描述工作。`,
     '',
-    `## 任务目标`,
-    task.goal,
-    task.context ? `\n## 补充上下文（主助手提供）\n${task.context}` : '',
+    `## 任务`,
+    subject,
+    description ? `\n## 详情\n${description}` : '',
     '',
     '## 执行要求',
     '1. 先用可用工具把任务做完；信息不足时，明确说明缺什么（不要编造、不要猜）。',
     '2. 产出文件时先用 write_file / 相应工具生成，再用 send_file 直接发给用户（当前对话是微信渠道）。',
     '3. 任务较长时，可用 notify_user 给用户发一句简短进度（最多 2 次）。',
     '4. 最后用中文给一段**结果说明**（≤200 字）：做了什么、结果如何、产物在哪（文件名/链接）。这段文字会作为任务结果推送给用户。',
-    '5. **你就是后台执行者**：你没有 delegate_task 等委派工具，不要试图委派或等待别人；遇到慢工具（导出文档、生成图片等）直接调用并耐心等它返回。',
+    '5. **你就是后台执行者**：你没有 task_create 等任务板工具，不要试图再委派或等待别人；遇到慢工具（导出文档、生成图片等）直接调用并耐心等它返回。',
   ].filter(Boolean).join('\n')
 }
 
-/** 结算通知文案（成功/失败/超时三种；带 task id 便于用户引用）。 */
-export function renderSettlementText(task) {
-  const head = `☑️ 任务 ${task.id} 完成`
-  if (task.status === 'done') {
-    return `${head}：${truncate(task.result, 200)}`
-  }
-  if (task.status === 'timeout') {
-    return `⏱ 任务 ${task.id} 超过时限未完成，已停止（${task.error || '超时'}）。回复「重试 ${task.id}」可以再试一次。`
-  }
-  if (task.status === 'cancelled') {
-    return `🚫 任务 ${task.id} 已取消。`
-  }
-  return `⚠️ 任务 ${task.id} 失败：${truncate(task.error || '未知原因', 160)}。回复「重试 ${task.id}」可以再试一次。`
+/** 结算通知文案。纪律（ADR-0035）：不含错误码/原始报错；失败不承诺"会自动重试"
+ * （gaveUp/nonRetryable 时自动重试已经停了，说了就是不会兑现的承诺）。 */
+export function renderSettlementText({ boardId, subject, kind, result = '' }) {
+  const label = `任务 #${boardId}（${truncate(subject, 24)}）`
+  if (kind === 'done') return `☑️ ${label}完成：${truncate(result, 200)}`
+  if (kind === 'nonRetryable') return `⚠️ ${label}这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。`
+  return `⚠️ ${label}试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。`
 }
 
 function truncate(text, max) {

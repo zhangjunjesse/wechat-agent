@@ -1,6 +1,10 @@
 # ADR-0025: 委派判据重构——按操作类型判定，判据放进"必然可见"的表面
 
-- 状态：Accepted
+- 状态：Accepted（**事实位置更新，2026-09-18 / ADR-0036**：本记录的核心机制——判据写在
+  每轮必然可见的工具描述里——原样有效，但承载工具已由 `delegate_task` 换成任务板的
+  `task_create`/`task_update`，判定问题从"要不要委派"泛化为"承诺要不要落板"（核心二分：
+  这轮给用户的是结果还是承诺）。下文提到 `delegate_task`/`list_tasks` 处按
+  `task_create`/`task_list` 读，机制结论不变）
 - 类型：Architecture / Prompt（判断力）
 - 日期：2026-09-16
 - 前身：`docs/DESIGN-task-delegation.md`（working proposal，已同步更新第 3/4/5/6 节）
