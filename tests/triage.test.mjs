@@ -86,3 +86,29 @@ test('chat verdicts pass through untouched', async () => {
   const { triage } = make([JSON.stringify({ kind: 'chat' })])
   assert.deepEqual(await triage({ text: '你好' }), { kind: 'chat' })
 })
+
+test('string-array plan is normalized, not rejected (real small-model output shape)', async () => {
+  const { triage } = make([JSON.stringify({ kind: 'task', ack: '好的我来办', plan: ['汇总今天的动态', '生成图片报告并发送'] })])
+  const r = await triage({ text: '总结昆山农商今天的消息做成图片报告' })
+  assert.equal(r.kind, 'task')
+  assert.deepEqual(r.plan.map((p) => p.subject), ['汇总今天的动态', '生成图片报告并发送'])
+  assert.deepEqual(r.plan[0].dependsOn, [])
+})
+
+test('sub-second empty gateway response: plain retry once, then degrade with distinct reason', async () => {
+  const ok = make(['', TASK_JSON]) // 第一次空 → 原样重试 → 成功
+  const r1 = await ok.triage({ text: 'x' })
+  assert.equal(r1.kind, 'task')
+  assert.equal(ok.calls.length, 2)
+  const bad = make(['', '   ']) // 两次都空 → triage_empty（不与坏 JSON 混淆）
+  const r2 = await bad.triage({ text: 'x' })
+  assert.equal(r2.kind, 'chat')
+  assert.equal(r2.reason, 'triage_empty')
+})
+
+test('unparsable reason carries a truncated raw snippet for diagnostics', async () => {
+  const { triage } = make(['我不是JSON我是散文', '还是散文'])
+  const r = await triage({ text: 'x' })
+  assert.equal(r.kind, 'chat')
+  assert.match(r.reason, /^triage_unparsable:.*散文/)
+})

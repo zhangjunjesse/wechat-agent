@@ -56,6 +56,13 @@ export function createTriage({ complete, timeoutMs = DEFAULT_TIMEOUT_MS, maxPlan
     let raw
     try {
       raw = await withTimeout(complete(messages, { temperature: 0, maxTokens: 600 }), timeoutMs)
+      // 生产实测（2026-09-18 16:40）：网关偶发在数百 ms 内返回 200 + 空 content
+      // （疑似限流降级）。空返回带纠正提示重试毫无意义——直接原样重试一次；
+      // 仍空则降级 chat，reason 单列便于和真正的坏 JSON 区分。
+      if (!String(raw || '').trim()) {
+        raw = await withTimeout(complete(messages, { temperature: 0, maxTokens: 600 }), timeoutMs)
+        if (!String(raw || '').trim()) return { kind: 'chat', reason: 'triage_empty' }
+      }
     } catch (e) {
       return { kind: 'chat', reason: `triage_failed:${e?.message || e}` }
     }
@@ -67,11 +74,17 @@ export function createTriage({ complete, timeoutMs = DEFAULT_TIMEOUT_MS, maxPlan
         parsed = parseTriageJson(raw)
       } catch { /* fall through to degrade */ }
     }
-    if (!parsed) return { kind: 'chat', reason: 'triage_unparsable' }
+    // 留痕：不可解析时把原始返回带进 reason（截断）——2026-09-18 事故里没有
+    // 这一行，定位只能靠离线复现猜。
+    if (!parsed) return { kind: 'chat', reason: `triage_unparsable:${String(raw || '').slice(0, 120).replace(/\s+/g, ' ')}` }
     if (parsed.kind !== 'task') return { kind: 'chat' }
 
     // ---- plan 代码校验（R2）：不信任 LLM 结构，任何一条不过 → 降级 chat ----
-    const plan = Array.isArray(parsed.plan) ? parsed.plan : []
+    // 归一化：小模型高频把 plan 返回成**字符串数组**（生产复现实锤：
+    // ["汇总今天的动态","梳理重点","生成图片报告"]）——这是合法语义，转成
+    // 对象（subject=该字符串，无依赖）而不是拒绝降级。
+    const rawPlan = Array.isArray(parsed.plan) ? parsed.plan : []
+    const plan = rawPlan.map((p) => (typeof p === 'string' ? { subject: p, description: '', activeForm: '', dependsOn: [] } : p))
     if (plan.length < 1 || plan.length > maxPlan) return { kind: 'chat', reason: `plan_size:${plan.length}` }
     const cleaned = []
     for (let i = 0; i < plan.length; i++) {
