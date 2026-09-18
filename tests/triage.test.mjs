@@ -96,3 +96,13 @@ test('plan: broken JSON with unescaped quotes is repaired (json-repair reuse)', 
   const p = await triage.plan({ text: 'x' })
   assert.equal(p[0].subject, '导出"报告"')
 })
+
+test('ASG guardrail interception degrades with its own reason and never retries (deterministic block)', async () => {
+  const { triage, calls } = make(['> ⚠️ [ASG 安全提示] asg 护栏拦截:命中「间接提示词注入检测」'])
+  const r = await triage.classify({ text: '总结昆山农商今天的消息' })
+  assert.equal(r.kind, 'chat')
+  assert.equal(r.reason, 'asg_guardrail_blocked')
+  assert.equal(calls.length, 1, '护栏是确定性拦截，不做无意义重试')
+  const p = make(['> ⚠️ [ASG 安全提示] asg 护栏拦截:命中「间接提示词注入检测」'])
+  assert.equal(await p.triage.plan({ text: 'x' }), null)
+})

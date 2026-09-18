@@ -113,12 +113,19 @@ export function createTriage({ complete, timeoutMs = CLASSIFY_TIMEOUT_MS, planTi
   return { classify, plan }
 }
 
-/** 调一次 LLM；空返回原样重试一次（生产实测：网关偶发数百 ms 返回 200+空 content）。 */
+/** 调一次 LLM；空返回原样重试一次（生产实测：网关偶发数百 ms 返回 200+空 content）。
+ * ASG 护栏拦截（2026-09-18 真凶——本管道时灵时不灵的根源）：网关前的 ASG
+ * 安全护栏把"用户内容嵌进指令模板"的分诊 prompt 判为「间接提示词注入」，
+ * 200 + 拦截提示文本、~230ms 返回。护栏是确定性拦截，重试无意义——识别后
+ * 直接降级并给专属 reason，治本要在 ASG 侧给本服务的调用加白。 */
+const GUARDRAIL_RE = /ASG 安全提示|护栏拦截|提示词注入检测/
 async function callWithEmptyRetry(complete, messages, opts, timeoutMs) {
   try {
     let text = await withTimeout(complete(messages, { temperature: 0, ...opts }), timeoutMs)
+    if (GUARDRAIL_RE.test(String(text || ''))) return { error: 'asg_guardrail_blocked' }
     if (!String(text || '').trim()) {
       text = await withTimeout(complete(messages, { temperature: 0, ...opts }), timeoutMs)
+      if (GUARDRAIL_RE.test(String(text || ''))) return { error: 'asg_guardrail_blocked' }
       if (!String(text || '').trim()) return { error: 'triage_empty' }
     }
     return { text: String(text) }
