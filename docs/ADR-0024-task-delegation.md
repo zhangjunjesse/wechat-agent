@@ -2,6 +2,9 @@
 
 - 状态：Accepted（**部分被 ADR-0025 取代**：§决策 3·判断力三层的 ① 四条硬判据与 ② 技能装判据；
   架构部分——独立实例/ephemeral/受限工具集/队列/超时/落库/通知纪律——仍然有效）
+- 替代提案（尚未落地）：`DESIGN-agent-task-board.md`（Working，2026-09-18）拟**取代本记录的
+  工具面**（delegate_task/list_tasks/task_status/retry_task 单发模型 → 任务板五工具 + 依赖 +
+  认领 + 重启恢复）；runner/结算/notified 底座条款由本记录继续持有，落地后新 ADR 与本记录互链
 - 类型：Architecture / Feature
 - 日期：2026-09-15
 - 前身：`docs/DESIGN-task-delegation.md`（working proposal，已实现，本记录为稳定决策）
