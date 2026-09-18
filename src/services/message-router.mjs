@@ -14,7 +14,12 @@ export class MessageRouter {
   #progress
   #boardStore
 
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = {}, boardStore = null }) {
+  /** `progress` 默认**关闭** ack/心跳（ADR-0037）：实测基线延迟（生产 "你好" 8.8s、
+   * "现在几点" 7.6s）本就压在原 8 秒阈值上，结果每句闲聊都先收一条"收到，正在处理"
+   * 再收答案——一问两条。长活的反馈通道现在是任务板（ADR-0036：建单即确认、
+   * activeForm 心跳、完成通知），这一层不再承担它。需要回来时用
+   * `CHAT_PROGRESS_ACK_MS` 设一个**远高于基线**的值（如 45000）而不是恢复 8000。 */
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = { ackDelayMs: Number(process.env.CHAT_PROGRESS_ACK_MS ?? 0) }, boardStore = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent

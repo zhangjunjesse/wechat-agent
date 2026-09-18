@@ -4,9 +4,14 @@
  * 期间若一声不响，用户不知道是在处理还是挂了，产生不安。
  *
  * 策略（三层，都不依赖模型配合）：
- *   1) 延迟 ack：任务 8 秒仍未完成才发「收到，正在处理」——短任务不打扰；
+ *   1) 延迟 ack：任务超过 ackDelayMs 仍未完成才发「收到，正在处理」——短任务不打扰；
  *   2) 心跳：超过 intervalMs 后每隔 intervalMs 推一条进度（最多 maxHeartbeats 条）；
  *   3) stop() 时清理定时器；任务失败由调用方发错误提示。
+ *
+ * **`ackDelayMs <= 0` = 整体关闭**（start() 变 no-op，既不 ack 也不心跳）。
+ * 1:1/网页对话路径已默认关闭，见 ADR-0037：实测基线延迟（"你好" 8.8s）本就压在
+ * 原 8 秒阈值上，于是每句闲聊都被 ack 一次；长活现在由任务板承接（ADR-0036），
+ * 这一层不再是它的反馈通道。群命令入口仍显式启用（跨渠道取件确认是另一个问题）。
  *
  * 用法：
  *   const p = createProgressNotifier({ provider, channel })
@@ -51,9 +56,11 @@ export function createProgressNotifier({
   }
 
   return {
-    /** 开始计时：ackDelayMs 内未 stop → 发 ack，进而进入心跳。 */
+    /** 开始计时：ackDelayMs 内未 stop → 发 ack，进而进入心跳。
+     * ackDelayMs <= 0 时整体关闭（不排定时器、永不发消息）。 */
     start() {
       startedAt = Date.now()
+      if (!(Number(ackDelayMs) > 0)) return // 关闭
       if (!channel?.contextToken || typeof provider?.sendText !== 'function') return
       ackTimer = setTimeout(() => {
         if (stopped) return

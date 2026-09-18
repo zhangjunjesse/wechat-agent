@@ -50,3 +50,13 @@ test('no channel token → never sends (web chat / unbound user)', async () => {
   notifier.stop()
   assert.deepEqual(sent, [])
 })
+
+test('ackDelayMs <= 0 disables the notifier entirely (ADR-0037: chat path default)', async () => {
+  for (const ackDelayMs of [0, -1]) {
+    const { sent, notifier } = harness({ ackDelayMs, intervalMs: 5, maxHeartbeats: 3 })
+    notifier.start()
+    await sleep(60)
+    notifier.stop()
+    assert.equal(sent.length, 0, `ackDelayMs=${ackDelayMs} 必须彻底静默，实际发了 ${sent.length} 条`)
+  }
+})
