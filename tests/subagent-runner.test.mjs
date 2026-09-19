@@ -50,7 +50,9 @@ test('board task is claimed, executed ephemerally, completed and the user notifi
     assert.match(calls[0].text, /https:\/\/x\/docx\/W1/)
     assert.match(calls[0].text, /看不到与用户的对话历史/)
     assert.equal(calls[0].ephemeral, true)
-    assert.match(calls[0].userId, /^subagent:task-/)
+    // 沙箱按用户分（不是按 run 分）：工具用 ctx.context.userId 解析路径，
+    // 同批次的兄弟任务必须落在同一个目录才能交接文件（2026-09-19 修复）
+    assert.equal(calls[0].userId, 'u1')
     // 板：completed + 结果回填；执行行：done + 关联板 id
     const done = board.get(t.id)
     assert.equal(done.status, 'completed')

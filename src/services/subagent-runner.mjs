@@ -131,7 +131,12 @@ export class SubagentRunner {
         t.unref?.()
       })
       const reply = await Promise.race([
-        agent.respond({ userId: `subagent:${run.id}`, text: prompt, profile: execProfile, channel: this.#channelFor(task.userId), ephemeral: true }).then((r) => ({ r })),
+        // userId 用 task.userId（= 该用户目录），不是 `subagent:${run.id}`：工具用
+        // ctx.context.userId 解析沙箱路径（file-tools / wechat-send-tools 都这样），
+        // 按 run 分目录会让同批次的兄弟任务互相看不到对方产出的文件——"生成报告"和
+        // "把报告发我"永远对不上（线上实例：task-17 生成、task-18 找不到）。会话与
+        // 记忆不受影响：ephemeral 仍为 true，两者都不落盘。
+        agent.respond({ userId: task.userId, text: prompt, profile: execProfile, channel: this.#channelFor(task.userId), ephemeral: true }).then((r) => ({ r })),
         timeout,
       ])
       if (!reply || reply.timedOut) {
