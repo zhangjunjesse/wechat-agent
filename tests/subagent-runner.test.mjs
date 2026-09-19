@@ -66,6 +66,38 @@ test('board task is claimed, executed ephemerally, completed and the user notifi
   } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 
+test('channel is threaded into agent.respond so send_file/notify_user work in board tasks (2026-09-19 fix: prompt promised "当前对话是微信渠道" but channel was never actually passed)', async () => {
+  const { file, board, runs, runner, calls, sent } = setup({ respond: async () => ({ text: 'ok' }) })
+  try {
+    const t = board.create({ userId: 'u1', subject: 's', description: '' })
+    runner.poke('u1')
+    assert.ok(await waitFor(() => sent.length >= 1))
+    // setup() 里的 contextTokens mock 对任何 uid 都命中缓存 → 应还原出完整 channel
+    assert.deepEqual(calls[0].channel, { type: 'ilink', providerBotId: 'bot-u1', toProviderUserId: 'u1', contextToken: 'tok-u1' })
+  } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})
+
+test('channel gracefully degrades to null when the contextToken cache is cold (same contract as web chat)', async () => {
+  const dbFile = path.join(os.tmpdir(), `runner-nochannel-${Date.now()}.db`)
+  const runs = new TaskRunStore({ file: dbFile })
+  const board = new AgentTaskStore({ file: dbFile })
+  const calls = []
+  const sent = []
+  const runner = new SubagentRunner({
+    agentFactory: async () => ({ respond: async (args) => { calls.push(args); return { text: 'ok' } } }),
+    board, runs,
+    provider: { sendText: async (a) => { sent.push(a); return {} } },
+    contextTokens: { get: () => null }, // 冷缓存：用户很久没发过消息
+    timeoutMs: 60_000,
+  })
+  try {
+    board.create({ userId: 'u1', subject: 's', description: '' })
+    runner.poke('u1')
+    assert.ok(await waitFor(() => calls.length >= 1))
+    assert.equal(calls[0].channel, null)
+  } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(dbFile, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})
+
 test('retryable failure is SILENT and released for retry; give-up notifies once (ADR-0035)', async () => {
   const { file, board, runs, runner, sent } = setup({
     respond: async () => { throw new Error('ETIMEDOUT network flake') }, // 可重试类

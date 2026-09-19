@@ -131,7 +131,7 @@ export class SubagentRunner {
         t.unref?.()
       })
       const reply = await Promise.race([
-        agent.respond({ userId: `subagent:${run.id}`, text: prompt, profile: execProfile, ephemeral: true }).then((r) => ({ r })),
+        agent.respond({ userId: `subagent:${run.id}`, text: prompt, profile: execProfile, channel: this.#channelFor(task.userId), ephemeral: true }).then((r) => ({ r })),
         timeout,
       ])
       if (!reply || reply.timedOut) {
@@ -208,6 +208,21 @@ export class SubagentRunner {
     const cached = this.#contextTokens?.get(userId)
     if (cached?.contextToken) return { providerBotId: cached.providerBotId, toProviderUserId: userId, contextToken: cached.contextToken }
     return null
+  }
+
+  /** `channel`（message-router.mjs 同款契约，见 wechat-send-tools.mjs）喂给子
+   * agent 的 run context——生产实锤（2026-09-19，真实用户"Z.俊"的会话）：
+   * buildSubagentPrompt 第 2 条一直告诉子 agent"当前对话是微信渠道，用
+   * send_file/notify_user 直接发"，但这里从未真正传过 channel，两个工具于是
+   * 每次都判 `!channel` 拒绝、回退成 write_file 下载链接——子任务生成的图片
+   * 报告因此从没有一次真正落进微信，用户只能点链接。复用 #safeNotify 已经在
+   * 用的同一份实时 contextToken 缓存（DESIGN-timed-tasks.md）：缓存命中就是
+   * 真实 WeChat 频道；缓存未命中（用户很久没发过消息）返回 null，
+   * agent.respond 对 channel:null 的降级行为和网页对话完全一致（见
+   * agents-sdk-agent.mjs #doRespond）。 */
+  #channelFor(userId) {
+    const target = this.#tokenFor(userId)
+    return target ? { type: 'ilink', ...target } : null
   }
 }
 
