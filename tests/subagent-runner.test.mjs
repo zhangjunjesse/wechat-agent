@@ -61,7 +61,9 @@ test('board task is claimed, executed ephemerally, completed and the user notifi
     assert.equal(run.status, 'done')
     assert.equal(run.boardTaskId, String(t.id))
     // 通知：一次，含板 id 与 subject
-    assert.match(sent[0].text, new RegExp(`任务 #${t.id}`))
+    // 成功通知不暴露内部任务编号（2026-09-19：用户反馈"任务 #N 完成"像机器日志）
+    assert.match(sent[0].text, /导出季度总结为 PDF/)
+    assert.doesNotMatch(sent[0].text, new RegExp(`任务 #${t.id}`))
     assert.match(sent[0].text, /报告\.pdf/)
     await sleep(50)
     assert.equal(sent.length, 1)
@@ -235,13 +237,21 @@ test('prompt is self-contained; settlement texts follow ADR-0035 wording rules',
   assert.match(prompt, /send_file/)
   assert.match(prompt, /你就是后台执行者/)
   assert.match(prompt, /没有 task_create/)
-  assert.match(renderSettlementText({ boardId: 3, subject: '周报', kind: 'done', result: 'ok' }), /任务 #3（周报）完成/)
+  assert.match(prompt, /给用户看的答复/)
+  assert.doesNotMatch(prompt, /给一段\*\*结果说明\*\*/)
+  // 成功通知：用意图当标题，不含内部任务编号（2026-09-19 用户反馈）
+  const done3 = renderSettlementText({ boardId: 3, subject: '周报', kind: 'done', result: 'ok' })
+  assert.match(done3, /^☑️ 周报/)
+  assert.doesNotMatch(done3, /任务 #3/)
   assert.match(renderSettlementText({ boardId: 3, subject: '周报', kind: 'gaveUp' }), /重试任务 3/)
   const nr = renderSettlementText({ boardId: 3, subject: '周报', kind: 'nonRetryable' })
   assert.match(nr, /服务问题/)
   assert.doesNotMatch(nr, /自动重试/)
   const long = renderSettlementText({ boardId: 1, subject: 's', kind: 'done', result: 'x'.repeat(400) })
   assert.ok(long.length < 260, `应截断，实际 ${long.length}`)
+  // 截断落在句末，不切在句子中间（2026-09-19 用户反馈）
+  const sentence = renderSettlementText({ boardId: 2, subject: 't', kind: 'done', result: '甲'.repeat(150) + '。' + '乙'.repeat(200) })
+  assert.match(sentence, /。$/, '长结果应在句号处收尾')
 })
 
 test('batch of 2: progress markers on each completion, closing line merged into the LAST one, notifications land in session', async () => {
@@ -266,13 +276,13 @@ test('batch of 2: progress markers on each completion, closing line merged into 
     const b = board.create({ userId: 'u1', subject: '写文档', description: '', metadata: { batchId, batchSize: 2, batchIndex: 1 }, blockedBy: [a.id] })
     runner.poke('u1')
     assert.ok(await waitFor(() => sent.length === 2, 4000), `应两条通知，实际 ${sent.length}`)
-    assert.match(sent[0], /\(1\/2\) 任务 #/)
+    assert.match(sent[0], /\(1\/2\)/)
     assert.doesNotMatch(sent[0], /都办完了/, '第一条不带收尾')
-    assert.match(sent[1], /\(2\/2\) 任务 #/)
+    assert.match(sent[1], /\(2\/2\)/)
     assert.match(sent[1], /这批事都办完了/, '收尾合并进最后一条')
     // S2：两条通知都进 transcript
     const { transcript } = sessions.get('u1')
-    assert.equal(transcript.filter((m) => m.role === 'assistant' && /任务 #/.test(m.content)).length, 2)
+    assert.equal(transcript.filter((m) => m.role === 'assistant' && /^☑️/.test(String(m.content).trim())).length, 2)
   } finally { runner.stop(); runs.close(); board.close(); sessions.close(); fs.rmSync(dbFile, { force: true, maxRetries: 5, retryDelay: 50 }); fs.rmSync(sfile, { force: true, maxRetries: 5, retryDelay: 50 }) }
 })
 

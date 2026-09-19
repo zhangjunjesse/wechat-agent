@@ -244,7 +244,10 @@ export function buildSubagentPrompt({ runId, boardId, subject, description = '' 
     '1. 先用可用工具把任务做完；信息不足时，明确说明缺什么（不要编造、不要猜）。',
     '2. 产出文件时先用 write_file / 相应工具生成，再用 send_file 直接发给用户（当前对话是微信渠道）。',
     '3. 任务较长时，可用 notify_user 给用户发一句简短进度（最多 2 次）。',
-    '4. 最后用中文给一段**结果说明**（≤200 字）：做了什么、结果如何、产物在哪（文件名/链接）。这段文字会作为任务结果推送给用户。',
+    '4. 最后用中文写**给用户看的答复**（≤150 字，直接作为微信消息发给用户）：',
+    '   - 只讲结果：做成了什么、产物是什么（文件名/要点），有链接就给链接；',
+    '   - **不要**写过程叙述（"我尝试了…""让我先…""需要说明的是…"）、不要写"任务完成""结果说明"这类标题、不要描述你用了哪些工具、不要提内部任务编号；',
+    '   - 没做成时，一句话说清卡在哪、缺什么，让用户知道下一步能怎么办。',
     '5. **你就是后台执行者**：你没有 task_create 等任务板工具，不要试图再委派或等待别人；遇到慢工具（导出文档、生成图片等）直接调用并耐心等它返回。',
   ].filter(Boolean).join('\n')
 }
@@ -252,17 +255,37 @@ export function buildSubagentPrompt({ runId, boardId, subject, description = '' 
 /** 结算通知文案。纪律（ADR-0035）：不含错误码/原始报错；失败不承诺"会自动重试"
  * （gaveUp/nonRetryable 时自动重试已经停了，说了就是不会兑现的承诺）。
  * 批次（progress/batchClosed 来自 #batchState）：多任务批次的每条通知带
- * (n/N)，收尾说明合并进最后一条——不额外发独立汇总。 */
+ * (n/N)，收尾说明合并进最后一条——不额外发独立汇总。
+ *
+ * 文案面向用户（2026-09-19 用户反馈"任务 #N 完成"像机器日志）：
+ * - 成功时**不出内部任务编号**，用意图（subject）当标题、正文只放结果；
+ * - 正文按段落取，截断落在句末，不再硬切 200 字切在句子中间；
+ * - 失败时保留编号，因为"重试任务 N"要用户可复制。
+ * 子 agent 侧已要求只写面向用户的结果（见 buildSubagentPrompt 第 4 条）。 */
 export function renderSettlementText({ boardId, subject, kind, result = '', progress = '', batchClosed = false, batchOk = 0, batchFailed = 0 }) {
-  const label = `${progress}任务 #${boardId}（${truncate(subject, 24)}）`
+  const head = subject ? truncate(subject, 24) : `任务 #${boardId}`
   const tail = batchClosed
     ? (batchFailed > 0
       ? '\n—— 这批事办完了：' + batchOk + ' 件完成，' + batchFailed + ' 件没做成。'
       : '\n—— 这批事都办完了。')
     : ''
-  if (kind === 'done') return `☑️ ${label}完成：${truncate(result, 200)}${tail}`
-  if (kind === 'nonRetryable') return `⚠️ ${label}这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
-  return `⚠️ ${label}试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
+  if (kind === 'done') return `☑️ ${progress}${head}\n\n${summarizeResult(result)}${tail}`
+  if (kind === 'nonRetryable') return `⚠️ ${progress}「${head}」这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
+  return `⚠️ ${progress}「${head}」试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
+}
+
+/** 结果正文的面向用户化：丢掉空行堆叠，最多 2 段；长了在句末收尾而不是硬切。 */
+function summarizeResult(text, max = 180) {
+  const body = String(text || '')
+    .split(/\n{2,}/)
+    .map((p) => p.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('\n')
+  if (body.length <= max) return body || '（没有更多说明）'
+  const cut = body.slice(0, max)
+  const end = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('\n'))
+  return end > max * 0.5 ? cut.slice(0, end + 1) : `${cut}…`
 }
 
 function truncate(text, max) {
