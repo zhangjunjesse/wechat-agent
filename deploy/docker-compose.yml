@@ -9,6 +9,9 @@ services:
     volumes:
       - ./data:/data
       - ../assistant-qr.jpg:/app/assistant-qr.jpg:ro
-      # Read-only access to the wechat-sync receiver's SQLite DB (same host,
-      # sibling container) for the wechat-search skill — see ADR-0007.
-      - /opt/wechat-sync/data:/wechat-sync-data:ro
+      # 读写挂载（ADR-0042，2026-09-19 由 :ro 改为可写）：
+      #   读 = wechat_* 工具检索聊天记录（ADR-0007）
+      #   写 = 助手把「用户跟助手的对话」落库，好让上面那些工具读得到全量
+      #        （微信副设备同步拿不到历史文字，生产实测漏 120 条）
+      # 写入方因此有两个（wechat-sync + 助手），风险控制见 ADR-0042。
+      - /opt/wechat-sync/data:/wechat-sync-data

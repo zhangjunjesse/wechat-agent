@@ -14,13 +14,20 @@ export class MessageRouter {
   #progress
   #boardStore
   #pipeline
+  #conversationLog
+  #convLogs = new Map()
 
   /** `progress` 默认**关闭** ack/心跳（ADR-0037）：实测基线延迟（生产 "你好" 8.8s、
    * "现在几点" 7.6s）本就压在原 8 秒阈值上，结果每句闲聊都先收一条"收到，正在处理"
    * 再收答案——一问两条。长活的反馈通道现在是任务板（ADR-0036：建单即确认、
    * activeForm 心跳、完成通知），这一层不再承担它。需要回来时用
-   * `CHAT_PROGRESS_ACK_MS` 设一个**远高于基线**的值（如 45000）而不是恢复 8000。 */
-  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = { ackDelayMs: Number(process.env.CHAT_PROGRESS_ACK_MS ?? 0) }, boardStore = null, pipeline = null }) {
+   * `CHAT_PROGRESS_ACK_MS` 设一个**远高于基线**的值（如 45000）而不是恢复 8000。
+   *
+   * `conversationLog({ chatWxid, chatDisplay })` 是可选工厂（ADR-0042）：把助手自己
+   * 收发的话落进 wechat-sync 的库，好让"用户跟助手的对话"能被 `wechat_*` 工具读到
+   * 全量（微信副设备同步拿不到历史文字，实测漏 120 条）。工厂返回 null 或抛异常都
+   * 只是关掉这个能力，绝不影响回复。 */
+  constructor({ bindings, provider, agent, allowPeerUsers = false, contextProvider = null, requireVerified = true, contextTokens = null, progress = { ackDelayMs: Number(process.env.CHAT_PROGRESS_ACK_MS ?? 0) }, boardStore = null, pipeline = null, conversationLog = null }) {
     this.#bindings = bindings
     this.#provider = provider
     this.#agent = agent
@@ -31,6 +38,21 @@ export class MessageRouter {
     this.#progress = progress
     this.#boardStore = boardStore
     this.#pipeline = pipeline
+    this.#conversationLog = conversationLog
+  }
+
+  /** 该用户的会话记录器（按私聊线程标识缓存，一个用户一个句柄）。 */
+  #logFor(profile, tenantKey) {
+    if (!this.#conversationLog) return null
+    const chatWxid = String(profile?.wxid || '').trim()
+    if (!chatWxid) return null // 没有可信线程标识就不写（与 ADR-0007 对私聊的判定一致）
+    if (this.#convLogs.has(chatWxid)) return this.#convLogs.get(chatWxid)
+    let log = null
+    try {
+      log = this.#conversationLog({ chatWxid, chatDisplay: String(profile?.nickname || '').trim() || chatWxid, tenantKey })
+    } catch { log = null }
+    this.#convLogs.set(chatWxid, log)
+    return log
   }
 
   async handleInbound(event) {
@@ -54,6 +76,12 @@ export class MessageRouter {
     }
     history.push({ role: 'user', ...normalized })
     const profile = await this.#contextProvider?.(tenantKey)
+    // 会话记录（ADR-0042）：把用户这条话落库，好让"用户跟助手的对话"可被
+    // wechat_* 工具读到。失败绝不影响下面任何流程。
+    const convLog = this.#logFor(profile, tenantKey)
+    if (convLog) {
+      try { convLog.recordInbound({ text: normalized.text, wxid: profile?.wxid, nickname: profile?.nickname }) } catch { /* 见类文档：绝不外抛 */ }
+    }
     if (this.#requireVerified && !profile?.nickname && !profile?.wxid) {
       const reply = { text: '请先完成身份验证。请在网页中添加微信“助手”，并向助手发送页面显示的验证码。验证通过后，我才能为你提供服务。' }
       await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: normalized.contextToken })
@@ -77,6 +105,7 @@ export class MessageRouter {
         await routed.commit() // 回执已送达 → 落板 + poke + 会话/记忆记账（S1/S5 在 commit 内）
         history.push({ role: 'assistant', text: routed.ack })
         this.#conversations.set(key, history)
+        if (convLog) { try { convLog.recordOutbound({ text: routed.ack }) } catch { /* 绝不外抛 */ } }
         return { accepted: true, duplicate: false, task: true, providerMessageId: sent.providerMessageId, text: routed.ack }
       }
     }
@@ -123,6 +152,8 @@ export class MessageRouter {
     const fresh = this.#contextTokens?.get(normalized.providerUserId)
     const sendToken = fresh?.contextToken || normalized.contextToken
     const sent = await this.#provider.sendText({ providerBotId: normalized.providerBotId, toProviderUserId: normalized.providerUserId, text: reply.text, contextToken: sendToken })
+    // 只在真的发出去之后才落库（否则库里会出现用户从没收到过的"回复"）
+    if (convLog) { try { convLog.recordOutbound({ text: reply.text }) } catch { /* 绝不外抛 */ } }
     return { accepted: true, duplicate: false, providerMessageId: sent.providerMessageId, text: reply.text }
   }
 }

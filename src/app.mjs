@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BindingService } from './services/binding-service.mjs'
 import { MessageRouter } from './services/message-router.mjs'
+import { ConversationLog } from './services/conversation-log.mjs'
 import { PollingService } from './services/polling-service.mjs'
 import { VerificationService } from './services/verification-service.mjs'
 import { resolveUserPath } from './services/user-sandbox.mjs'
@@ -24,12 +25,21 @@ import { renderDigestPage } from './services/wechat-digest.mjs'
  * 记录。 */
 export const DEFAULT_SUBSCRIPTIONS = ['每日资讯', '微信日报', '微信周报']
 
+/** 会话记录工厂（ADR-0042）。只在配了 `WECHAT_LOG_DB` 时启用；库不可写（挂载仍是
+ * `:ro`）时 `ConversationLog` 内部退化成 no-op，回复流程不受任何影响。
+ * 返回 `undefined` 表示这个能力整个不存在。 */
+function buildConversationLog() {
+  const dbFile = process.env.WECHAT_LOG_DB
+  if (!dbFile) return undefined
+  return ({ chatWxid, chatDisplay }) => new ConversationLog({ dbFile, chatWxid, chatDisplay, ownerDisplay: process.env.ASSISTANT_DISPLAY_NAME || '助手' })
+}
+
 export function createApp({ provider, agent = { async respond({ text }) { return { text: `Echo: ${text}` } } }, clock, pollIntervalMs, store, verifier, profileStore, downloadTokens, userFilesRoot = process.env.USER_FILES_ROOT || 'data/user-files', contextTokens = null, reportStore = null, lark = null, taskStore = null, boardStore = null, pipeline = null, defaultSubscriptions = DEFAULT_SUBSCRIPTIONS, onVerifiedError = (error, name) => console.warn(`default subscription failed${name ? ` (${name})` : ''}: ${error?.message || error}`) }) {
   const owned = []
   let polling
   const lastPollLog = new Map() // providerBotId -> { at, error }
   const bindings = new BindingService({ provider, clock, store, onBound: async (binding) => { if (!binding.providerBotId) return; if (binding.providerSession) await provider.restoreSession?.(binding.providerSession); polling?.start(binding.providerBotId) } })
-  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens, boardStore, pipeline })
+  const router = new MessageRouter({ provider, agent, bindings: owned, allowPeerUsers: true, requireVerified: process.env.NODE_ENV === 'production', contextProvider: async (key) => (await profileStore?.get(key)) || (await profileStore?.getByIlink?.(key)), contextTokens, boardStore, pipeline, conversationLog: buildConversationLog() })
   // 核验通过 → 默认订阅（ADR-0031）。VerificationService 的 onVerified 钩子此前
   // 一直是 null（存在但没人接），这里是它的第一个使用者。
   const verification = verifier
