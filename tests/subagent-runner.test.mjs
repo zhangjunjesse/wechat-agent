@@ -5,7 +5,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { TaskRunStore } from '../src/services/task-run-store.mjs'
 import { AgentTaskStore } from '../src/services/agent-task-store.mjs'
-import { SubagentRunner, buildSubagentPrompt, renderSettlementText } from '../src/services/subagent-runner.mjs'
+import { SubagentRunner, buildSubagentPrompt, renderSettlementText, polishForUser } from '../src/services/subagent-runner.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -319,4 +319,32 @@ test('batch closes even when the last member is given up (mixed stats in closing
     assert.ok(await waitFor(() => sent.length === 2, 4000))
     assert.match(sent[1], /1 件完成，1 件没做成/)
   } finally { runner.stop(); runs.close(); board.close(); fs.rmSync(dbFile, { force: true, maxRetries: 5, retryDelay: 50 }) }
+})
+
+test('交付层：子任务不许对用户说话——内部汇报被清洗，纯元描述整条不发', () => {
+  // 内部任务编号、内部小标题、工具名、过程叙述全部不出现
+  const raw = [
+    '任务 #9（搜索德文猫相关资料）完成：',
+    '结果说明',
+    '我尝试了网页抓取和公众号搜索，都不太行。',
+    '已用 send_file 把图片发给用户。',
+    '德文卷毛猫资料要点已整理：品种起源、外貌特征、性格、饲养要点、健康注意。',
+  ].join('\n')
+  const clean = polishForUser(raw)
+  assert.doesNotMatch(clean, /任务 #\d+/)
+  assert.doesNotMatch(clean, /结果说明/)
+  assert.doesNotMatch(clean, /send_file/)
+  assert.doesNotMatch(clean, /我尝试了/)
+  assert.match(clean, /德文卷毛猫资料要点已整理/)
+
+  // 整条都是元描述 → 返回空串（不该发给用户）
+  assert.equal(polishForUser('已用 send_file 发送。'), '')
+  assert.equal(polishForUser('结果说明\n我已发送给你。'), '')
+
+  // 渲染层：正文为空且非批次收尾 → 空串（runner 据此不推送）
+  const silent = renderSettlementText({ boardId: 5, subject: '发报告', kind: 'done', result: '已用 send_file 发送。' })
+  assert.equal(silent, '')
+  // 批次收尾行不能被吞掉
+  const closing = renderSettlementText({ boardId: 5, subject: '发报告', kind: 'done', result: '已用 send_file 发送。', progress: '(2/2) ', batchClosed: true })
+  assert.match(closing, /这批事都办完了/)
 })

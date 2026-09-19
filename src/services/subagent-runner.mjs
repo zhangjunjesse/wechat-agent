@@ -196,6 +196,9 @@ export class SubagentRunner {
 
   async #safeNotify(run, task, text) {
     try {
+      // 交付层可能判定"这一条没有面向用户的内容"（空串）：此时不推、也不进
+      // transcript——子任务不该以任何形式对用户发言（2026-09-19 用户约束）。
+      if (!String(text || '').trim()) return
       if (!run || !this.#runs.markNotified(run.id)) return // notified CAS：至多一次
       const target = this.#tokenFor(task.userId)
       // S2（ADR-0038）：这条通知是"用户看到的对话事实"，必须进
@@ -242,8 +245,8 @@ export function buildSubagentPrompt({ runId, boardId, subject, description = '' 
     '',
     '## 执行要求',
     '1. 先用可用工具把任务做完；信息不足时，明确说明缺什么（不要编造、不要猜）。',
-    '2. 产出文件时先用 write_file / 相应工具生成，再用 send_file 直接发给用户（当前对话是微信渠道）。',
-    '3. 任务较长时，可用 notify_user 给用户发一句简短进度（最多 2 次）。',
+    '2. 产出文件时先用 write_file / 相应工具生成，再用 send_file 直接把**产物**发给用户（当前对话是微信渠道）。除了 send_file 交付产物，**不要以任何其他方式直接对用户说话**——进度与结论一律写在第 4 条的答复里，由主 agent 呈现给用户。',
+    '3. 你只有一次说话的机会（第 4 条那段答复），没有进度播报工具；长任务直接耐心做完。',
     '4. 最后用中文写**给用户看的答复**（≤150 字，直接作为微信消息发给用户）：',
     '   - 只讲结果：做成了什么、产物是什么（文件名/要点），有链接就给链接；',
     '   - **不要**写过程叙述（"我尝试了…""让我先…""需要说明的是…"）、不要写"任务完成""结果说明"这类标题、不要描述你用了哪些工具、不要提内部任务编号；',
@@ -269,14 +272,25 @@ export function renderSettlementText({ boardId, subject, kind, result = '', prog
       ? '\n—— 这批事办完了：' + batchOk + ' 件完成，' + batchFailed + ' 件没做成。'
       : '\n—— 这批事都办完了。')
     : ''
-  if (kind === 'done') return `☑️ ${progress}${head}\n\n${summarizeResult(result)}${tail}`
+  if (kind === 'done') {
+    const body = summarizeResult(polishForUser(result))
+    // 交付层判定"这条没有面向用户的内容" → 不发（用户只该看到主 agent 的话；
+    // 产物本身已由 send_file 交付）。例外：批次收尾行必须送出去，否则这批活
+    // 干完了用户一无所知——那时只留收尾行。
+    if (!body) return batchClosed ? `☑️ ${progress}${head}${tail}` : ''
+    return `☑️ ${progress}${head}\n\n${body}${tail}`
+  }
   if (kind === 'nonRetryable') return `⚠️ ${progress}「${head}」这边遇到了服务问题，重试也解决不了，我先停了，已经记下来。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
   return `⚠️ ${progress}「${head}」试了几次都没做成，先停下了。想再试的话跟我说「重试任务 ${boardId}」。${tail}`
 }
 
-/** 结果正文的面向用户化：丢掉空行堆叠，最多 2 段；长了在句末收尾而不是硬切。 */
+/** 结果正文的面向用户化：丢掉空行堆叠，最多 2 段；长了在句末收尾而不是硬切。
+ * 入参为空串时**原样返回空串**——空串是交付层"这条不该发给用户"的信号，
+ * 不能被"（没有更多说明）"填充掉（否则静默判定永远失效）。 */
 function summarizeResult(text, max = 180) {
-  const body = String(text || '')
+  const src = String(text || '').trim()
+  if (!src) return ''
+  const body = src
     .split(/\n{2,}/)
     .map((p) => p.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
@@ -286,6 +300,36 @@ function summarizeResult(text, max = 180) {
   const cut = body.slice(0, max)
   const end = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('\n'))
   return end > max * 0.5 ? cut.slice(0, end + 1) : `${cut}…`
+}
+
+/** 交付层（2026-09-19 用户约束："跟用户对话的永远只有主 agent，子任务不要发给用户"）：
+ * 子任务的输出是**给内部看的执行汇报**，不能原样出现在用户面前。送出去之前由这层
+ * 清洗成"面向用户的交付说明"：
+ *   - 去掉内部任务编号（任务 #N）；
+ *   - 去掉"结果说明/任务完成/执行说明"这类内部小标题；
+ *   - 删掉提到内部机制（send_file/工具名）或过程叙述的句子；
+ * 清洗后若只剩元描述（如"已用 send_file 发送"），返回空串表示**这一条不该发给用户**。
+ * 用纯代码规则实现——仍然不经过 LLM，保持结算通知"快且确定"（ADR-0038）。 */
+export function polishForUser(text) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((l) => l.replace(/任务\s*#\d+/g, '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .filter((l) => !/^(结果说明|任务完成|任务结果说明|执行说明|完成说明)[：:]?$/.test(l))
+    .filter((l) => !/(send_file|notify_user)/.test(l))
+    // 回显任务名的开场残句（"（搜索德文猫资料）完成："）
+    .filter((l) => !/^[（(][^）)]{0,40}[）)][^。]{0,12}[：:]?$/.test(l))
+    // 第一人称过程叙述（"我尝试了…""让我先…"）——用户不需要看执行者的心路。
+    // 要求句子以"我/让"起头且紧跟过程动词，正常交付句不会被误伤。
+    .filter((l) => !/^(我|让)(?:先|来|去|再)?(尝试|试了|试过|检查|确认|搜|查|找|看|读取|运行|执行|调用|准备|打算|计划)/.test(l))
+    // 纯投递汇报：短、含投递动词、**且没有任何交付物**（无扩展名/无内容片段）。
+    // 白名单优先——带文件名或够长的一律保留，别误杀"已导出并发送 报告.pdf"。
+    .filter((l) => {
+      const isDelivery = /(发送|发给|发你|推送|投递|已发)/.test(l)
+      const hasArtifact = /\.[A-Za-z0-9]{2,5}\b/.test(l) || l.length >= 25
+      return !(isDelivery && !hasArtifact)
+    })
+  return lines.join('\n').replace(/\n{2,}/g, '\n').trim()
 }
 
 function truncate(text, max) {

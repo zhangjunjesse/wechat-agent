@@ -172,7 +172,13 @@ const boardStore = new AgentTaskStore({ file: taskRunsFile })
 // 终结"已用 N 秒永远涨"的假象（必须在 runner.start() 之前）。
 const orphaned = taskRunStore.failOrphans()
 if (orphaned) console.log(`task runs: ${orphaned} orphaned run(s) from previous process marked failed`)
+// 独立 thinking 缓存，受限工具集：无任务板工具防递归；**去掉 notify_user**——
+// 2026-09-19 用户约束："跟用户对话的永远只有主 agent，子任务不要发给用户"。
+// notify_user 的唯一用途是让子任务直接对用户播报进度，与约束冲突；保留
+// send_file（交付产物本身，不算"说话"）。进度由主 agent 的回执 + runner 的
+// 结算通知承担（ADR-0038）。
 const subagentTools = buildTools({ memoryManager, skillRegistry, fetchImpl: globalThis.fetch, wechatLogStore, wechatMediaDir, root: userFilesRoot, issueDownloadLink, provider, taskStore: null, reportStore: null, lark, vision })
+  .filter((t) => t.name !== 'notify_user')
 const makeSubagent = () => process.env.OPENAI_API_KEY
   ? new AgentsSdkAgent({ model: process.env.OPENAI_MODEL || 'deepseek-flash', baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1', apiKey: process.env.OPENAI_API_KEY, ...sessionOpts, tools: subagentTools, skillRegistry })
   : null
