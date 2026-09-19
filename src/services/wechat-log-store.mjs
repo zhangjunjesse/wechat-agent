@@ -69,13 +69,34 @@ export class WechatLogStore {
     const wxid = String(identity?.wxid || '').trim()
     const nickname = String(identity?.nickname || '').trim()
     const out = new Map()
+    const addPrivate = (chatWxid, display) => {
+      if (!chatWxid) return
+      // 私聊 = 该用户与助手的对话（2026-09-19 用户澄清）。名字用同步库里的真实
+      // chat_display（用户的昵称，如 "Z.俊"），并保留工具别名"助手"——
+      // 2026-09-19 之前这里写死成 ASSISTANT_CHAT_LABEL，导致 search_chat("Z.俊")
+      // 既匹配不上名字也匹配不上 wxid（客户端里自己的昵称正是该私聊的显示名）。
+      out.set(chatWxid, {
+        chatWxid,
+        name: display || ASSISTANT_CHAT_LABEL,
+        alias: ASSISTANT_CHAT_LABEL,
+        isGroup: false,
+      })
+    }
+    const nameOfPrivate = (chatWxid) => {
+      try {
+        const row = this.#db.prepare(
+          'SELECT chat_display FROM messages WHERE chat_wxid = ? AND is_group = 0 ORDER BY ts DESC LIMIT 1'
+        ).get(chatWxid)
+        return row?.chat_display ? String(row.chat_display) : ''
+      } catch { return '' }
+    }
     if (wxid) {
       const rows = this.#db.prepare(
         `SELECT chat_wxid, MAX(chat_name) AS chat_name FROM chat_roster
          WHERE member_wxid = ? GROUP BY chat_wxid ORDER BY chat_name`
       ).all(wxid)
       for (const r of rows) out.set(r.chat_wxid, { chatWxid: r.chat_wxid, name: r.chat_name || r.chat_wxid, isGroup: true })
-      out.set(wxid, { chatWxid: wxid, name: ASSISTANT_CHAT_LABEL, isGroup: false })
+      addPrivate(wxid, nameOfPrivate(wxid))
     } else if (nickname) {
       const owners = this.#db.prepare(
         `SELECT DISTINCT member_wxid FROM chat_roster WHERE member_display = ?`
@@ -90,6 +111,11 @@ export class WechatLogStore {
          WHERE member_display = ? GROUP BY chat_wxid ORDER BY chat_name`
       ).all(nickname)
       for (const r of rows) out.set(r.chat_wxid, { chatWxid: r.chat_wxid, name: r.chat_name || r.chat_wxid, isGroup: true })
+      // 无 wxid 时：该用户与助手的私聊就是 chat_display 等于其昵称的那条
+      const priv = this.#db.prepare(
+        'SELECT chat_wxid, chat_display FROM messages WHERE is_group = 0 AND chat_display = ? ORDER BY ts DESC LIMIT 1'
+      ).get(nickname)
+      if (priv) addPrivate(priv.chat_wxid, priv.chat_display)
     }
     return [...out.values()]
   }
@@ -151,7 +177,17 @@ export class WechatLogStore {
     const exact = accessible.find((c) => c.chatWxid === q || c.name === q)
     if (exact) return exact.chatWxid
     const partial = accessible.find((c) => c.name.includes(q))
-    return partial ? partial.chatWxid : null
+    if (partial) return partial.chatWxid
+    // 平台不能只靠 accessibleChats 的名字表：私聊的显示名就是该用户自己的昵称，
+    // 而用户问的往往正是"我跟助手的对话"或自己的昵称。补两条按身份的兜底解析。
+    const nickname = String(identity?.nickname || '').trim()
+    if (nickname && q === nickname) {
+      const direct = accessible.find((c) => !c.isGroup)
+      if (direct) return direct.chatWxid
+    }
+    const wxid = String(identity?.wxid || '').trim()
+    if (wxid && q === wxid) return wxid
+    return null
   }
 
   #queryMessages({ chatWxids, contentLike, senderWxid, senderDisplay, sinceMs, untilMs, limit = DEFAULT_LIMIT }) {

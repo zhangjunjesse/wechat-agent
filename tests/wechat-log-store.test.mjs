@@ -70,8 +70,12 @@ const lisi = { wxid: 'wxid_li', nickname: '李四' }
 
 test('accessibleChats: group membership plus own direct thread, isolated per user', () => {
   withStore((store) => {
+    // 私聊 = 该用户与助手的对话，显示名取同步库里的真实 chat_display（=用户昵称），
+    // 而不是写死的 "与助手的对话（私聊）"——后者曾让 searchChat("张三") 解析不到
+    // （见 tests/wechat-private-chat.test.mjs 的回归说明）。
     const zChats = store.accessibleChats(zhangsan).map((c) => c.name).sort()
-    assert.deepEqual(zChats, ['与助手的对话（私聊）', '项目群'])
+    assert.deepEqual(zChats, ['张三', '项目群'])
+    // 李四没有私聊记录 → 回落到工具别名，会话本身依然可访问
     const lChats = store.accessibleChats(lisi).map((c) => c.name).sort()
     assert.deepEqual(lChats, ['与助手的对话（私聊）', '项目群', '闲聊群'].sort())
   })
