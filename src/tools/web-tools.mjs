@@ -4,12 +4,18 @@ import net from 'node:net'
 
 /** Web tools with SSRF protection: resolve the host and reject private/loopback
  * addresses before fetching, so a user message can't make the server probe
- * internal services. get_weather uses Open-Meteo (no key required). */
+ * internal services. get_weather uses Open-Meteo (no key required).
+ *
+ * 只解析 A 记录（`family: 4`）：2026-09-19 之前用默认解析，拿到 AAAA 记录后
+ * 被 `isPrivateIp` 的"含冒号即拦截"判成内网，**所有公网网址一律被拒**
+ * （百度、微信公众号、维基百科实测全部报"目标地址不允许访问"），web_fetch
+ * 对外网等于完全不可用。SSRF 防护只需判定实际会去连的那个地址，而这里下行
+ * 出网走 IPv4，所以按 IPv4 判定即可。 */
 export function webTools({ fetchImpl = globalThis.fetch } = {}) {
   const safeHost = async (url) => {
     const u = new URL(url)
     const host = u.hostname
-    const addrs = await dns.lookup(host, { all: true }).catch(() => [])
+    const addrs = await dns.lookup(host, { all: true, family: 4 }).catch(() => [])
     for (const a of addrs) {
       const ip = a.address
       if (isPrivateIp(ip)) throw new Error('目标地址不允许访问（内网/保留地址）')
