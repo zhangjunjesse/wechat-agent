@@ -26,6 +26,7 @@ import { buildTools } from './tools/index.mjs'
 import { LarkTokenStore } from './services/lark-token-store.mjs'
 import { LarkClient } from './services/lark-client.mjs'
 import { GroupCommandWatcher } from './services/group-command-watcher.mjs'
+import { PrivateChatWatcher } from './services/private-chat-watcher.mjs'
 import { TaskRunStore } from './services/task-run-store.mjs'
 import { AgentTaskStore } from './services/agent-task-store.mjs'
 import { SubagentRunner } from './services/subagent-runner.mjs'
@@ -269,6 +270,20 @@ const groupWatcher = wechatLogStore && agent && process.env.WECHAT_LOG_DB
     })
   : null
 groupWatcher?.start()
+
+// 私聊消息巡检（私聊入口：收走 wechat-sync，发走 iLink 私聊；ADR-0043）。
+// 用户微信里的「助手」联系人没有对应 iLink bot，私聊只进同步库——照群命令监听器的
+// 骨架定时扫 `is_group=0 AND sender='them'` 的新消息当作用户指令处理。
+// 依赖 WECHAT_LOG_DB + agent，缺失时休眠。
+const privateWatcher = wechatLogStore && agent && process.env.WECHAT_LOG_DB
+  ? new PrivateChatWatcher({
+      dbFile: process.env.WECHAT_LOG_DB,
+      agent, provider, profileStore, contextTokens,
+      cursorFile: process.env.PRIVATE_WATCHER_CURSOR || 'data/private-chat-watcher-cursor.json',
+      onError: (error, row) => console.warn(`private chat error (${row?.msg_id || '?'}): ${error?.message || error}`),
+    })
+  : null
+privateWatcher?.start()
 
 // `taskStore` 进 createApp 是为了 ADR-0031 的"核验通过即默认订阅"——VerificationService
 // 的 onVerified 钩子此前一直没人接，现在由 createApp 内部接上。
